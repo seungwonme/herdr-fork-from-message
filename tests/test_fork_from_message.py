@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "fork_from_message.py"
+MANIFEST = SCRIPT.parents[1] / "herdr-plugin.toml"
 SPEC = importlib.util.spec_from_file_location("fork_from_message", SCRIPT)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -185,6 +187,14 @@ def context(cwd: str):
 
 
 class ForkWorkflowTests(unittest.TestCase):
+    def test_public_plugin_id_matches_manifest_and_runtime(self):
+        manifest = MANIFEST.read_text(encoding="utf-8")
+        match = re.search(r'^id = "([^"]+)"$', manifest, re.MULTILINE)
+
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), "i-amgeek.fork-from-message")
+        self.assertEqual(MODULE.PLUGIN_ID, match.group(1))
+
     def test_success_forks_exact_session_and_opens_picker_before_focus(self):
         with tempfile.TemporaryDirectory() as cwd:
             client = FakeClient(cwd)
