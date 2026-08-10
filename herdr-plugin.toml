@@ -1,13 +1,13 @@
 id = "local.codex-fork-from-message"
-name = "Codex Fork from Message"
-version = "0.1.0"
+name = "Agent Fork from Message"
+version = "0.2.0"
 min_herdr_version = "0.8.0"
-description = "Fork the focused Codex session in a new tab and open its native transcript picker"
+description = "Fork the focused Codex or Claude session and open its native message picker"
 platforms = ["macos", "linux"]
 
 [[actions]]
 id = "fork"
-title = "Fork Codex from message"
-description = "Fork the focused Codex session in a new tab and choose an earlier user message"
+title = "Fork agent from message"
+description = "Fork the focused Codex or Claude session and choose an earlier user message"
 contexts = ["pane"]
 command = ["python3", "scripts/fork_from_message.py"]

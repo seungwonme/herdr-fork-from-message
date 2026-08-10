@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fork the focused Herdr Codex pane, then open Codex's transcript picker."""
+"""Fork the focused Herdr Codex or Claude pane, then open its message picker."""
 
 from __future__ import annotations
 
@@ -16,7 +16,8 @@ from typing import Any, Mapping, Sequence
 
 
 PLUGIN_ID = "local.codex-fork-from-message"
-ACTION_TITLE = "Fork Codex from message"
+ACTION_TITLE = "Fork agent from message"
+SUPPORTED_AGENTS = {"codex": "Codex", "claude": "Claude"}
 COMMAND_TIMEOUT_SECONDS = 15
 START_TIMEOUT_MILLISECONDS = 45_000
 START_PROCESS_TIMEOUT_SECONDS = 55
@@ -26,6 +27,7 @@ PICKER_TIMEOUT_SECONDS = 8
 POLL_INTERVAL_SECONDS = 0.2
 TRANSCRIPT_MARKERS = ("edit prev",)
 PICKER_MARKERS = ("edit next", "edit message")
+CLAUDE_PICKER_MARKERS = ("restore the code and/or conversation",)
 HOOK_REVIEW_MARKER = "hooks need review"
 
 
@@ -112,34 +114,49 @@ def load_invocation_context(env: Mapping[str, str]) -> Mapping[str, Any]:
     return _object(context, "plugin invocation context")
 
 
-def _source_details(context: Mapping[str, Any], pane: Mapping[str, Any]) -> tuple[str, str, str, str]:
+def _source_details(
+    context: Mapping[str, Any], pane: Mapping[str, Any]
+) -> tuple[str, str, str, str, str]:
     pane_id = _nonempty_string(context.get("focused_pane_id"))
     if pane_id is None:
-        raise ForkError("No focused pane was available. Focus a Codex pane and try again.")
+        raise ForkError("No focused pane was available. Focus a Codex or Claude pane and try again.")
 
     actual_pane_id = _nonempty_string(pane.get("pane_id"))
     if actual_pane_id != pane_id:
-        raise ForkError("The focused pane changed before it could be verified. Focus the Codex pane and retry.")
+        raise ForkError(
+            "The focused pane changed before it could be verified. "
+            "Focus the Codex or Claude pane and retry."
+        )
 
-    if pane.get("agent") != "codex":
-        detected = _nonempty_string(pane.get("agent")) or "no supported agent"
-        raise ForkError(f"The focused pane is {detected}, not Codex. Focus a Codex pane and retry.")
+    agent_kind = _nonempty_string(pane.get("agent"))
+    if agent_kind not in SUPPORTED_AGENTS:
+        detected = agent_kind or "no recognized agent"
+        raise ForkError(
+            f"The focused pane is {detected}; only Codex and Claude are supported. "
+            "Focus a Codex or Claude pane and retry."
+        )
+    agent_name = SUPPORTED_AGENTS[agent_kind]
 
     session = pane.get("agent_session")
     if not isinstance(session, dict):
         raise ForkError(
-            "The focused pane has no trusted Codex session ID from Herdr's Codex integration. "
-            "Run `herdr integration install codex`, restart Codex, and retry."
+            f"The focused pane has no trusted {agent_name} session ID from Herdr's integration. "
+            f"Run `herdr integration install {agent_kind}`, restart {agent_name}, and retry."
         )
-    if session.get("agent") != "codex" or session.get("kind") != "id" or session.get("source") != "herdr:codex":
+    if (
+        session.get("agent") != agent_kind
+        or session.get("kind") != "id"
+        or session.get("source") != f"herdr:{agent_kind}"
+    ):
         raise ForkError(
-            "The focused pane has no trusted Codex session ID from Herdr's Codex integration. "
-            "Run `herdr integration install codex`, restart Codex, and retry."
+            f"The focused pane has no trusted {agent_name} session ID from Herdr's integration. "
+            f"Run `herdr integration install {agent_kind}`, restart {agent_name}, and retry."
         )
     session_id = _canonical_uuid(session.get("value"))
     if session_id is None:
         raise ForkError(
-            "Herdr's Codex integration reported a missing or invalid session ID. Restart Codex and retry."
+            f"Herdr's {agent_name} integration reported a missing or invalid session ID. "
+            f"Restart {agent_name} and retry."
         )
 
     workspace_id = _nonempty_string(pane.get("workspace_id"))
@@ -152,9 +169,9 @@ def _source_details(context: Mapping[str, Any], pane: Mapping[str, Any]) -> tupl
         or _nonempty_string(pane.get("cwd"))
     )
     if cwd is None or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
-        raise ForkError("The focused Codex pane has no usable working directory.")
+        raise ForkError("The focused agent pane has no usable working directory.")
 
-    return pane_id, session_id, workspace_id, cwd
+    return pane_id, session_id, workspace_id, cwd, agent_kind
 
 
 def _fork_label(context: Mapping[str, Any]) -> str:
@@ -171,10 +188,12 @@ class ForkWorkflow:
         client: HerdrClient,
         context: Mapping[str, Any],
         codex_home: str | None = None,
+        claude_config_dir: str | None = None,
     ) -> None:
         self.client = client
         self.context = context
         self.codex_home = codex_home
+        self.claude_config_dir = claude_config_dir
         self.created_tab_id: str | None = None
         self.cleanup_error: str | None = None
 
@@ -195,7 +214,9 @@ class ForkWorkflow:
 
         pane_response = self.client.json(["pane", "get", source_pane_id])
         pane = _object(_object(pane_response.get("result"), "pane result").get("pane"), "pane data")
-        source_pane_id, source_session_id, workspace_id, cwd = _source_details(self.context, pane)
+        source_pane_id, source_session_id, workspace_id, cwd, agent_kind = _source_details(
+            self.context, pane
+        )
 
         tab_args = [
             "tab",
@@ -207,8 +228,10 @@ class ForkWorkflow:
             "--label",
             _fork_label(self.context),
         ]
-        if self.codex_home:
+        if agent_kind == "codex" and self.codex_home:
             tab_args.extend(["--env", f"CODEX_HOME={self.codex_home}"])
+        if agent_kind == "claude" and self.claude_config_dir:
+            tab_args.extend(["--env", f"CLAUDE_CONFIG_DIR={self.claude_config_dir}"])
         tab_args.append("--no-focus")
         tab_response = self.client.json(tab_args)
         tab_result = _object(tab_response.get("result"), "tab creation result")
@@ -221,14 +244,13 @@ class ForkWorkflow:
         if tab_id is None or fork_pane_id is None:
             raise ForkError("Herdr created a tab but did not return its tab and pane IDs.")
 
-        agent_name = f"codex_fork_{uuid.uuid4().hex[:12]}"
-        self._start_fork_agent(agent_name, fork_pane_id, source_session_id)
+        agent_name = f"{agent_kind}_fork_{uuid.uuid4().hex[:12]}"
+        self._start_fork_agent(agent_name, fork_pane_id, source_session_id, agent_kind)
         self._fail_if_startup_blocked(fork_pane_id)
-        self.client.json(["agent", "send-keys", fork_pane_id, "ctrl+t"])
-        self._wait_for_transcript(fork_pane_id)
-        self.client.json(["agent", "send-keys", fork_pane_id, "esc"])
-        self._wait_for_picker(fork_pane_id)
-        fork_session_id = self._reported_fork_session(fork_pane_id, source_session_id)
+        self._open_message_picker(fork_pane_id, agent_kind)
+        fork_session_id = self._reported_fork_session(
+            fork_pane_id, source_session_id, agent_kind
+        )
         self.client.json(["tab", "focus", tab_id])
 
         result = ForkResult(
@@ -242,20 +264,30 @@ class ForkWorkflow:
         self.created_tab_id = None
         return result
 
-    def _start_fork_agent(self, agent_name: str, pane_id: str, source_session_id: str) -> None:
+    def _start_fork_agent(
+        self,
+        agent_name: str,
+        pane_id: str,
+        source_session_id: str,
+        agent_kind: str,
+    ) -> None:
+        native_args = (
+            ["fork", source_session_id]
+            if agent_kind == "codex"
+            else ["--resume", source_session_id, "--fork-session"]
+        )
         args = [
             "agent",
             "start",
             agent_name,
             "--kind",
-            "codex",
+            agent_kind,
             "--pane",
             pane_id,
             "--timeout",
             str(START_TIMEOUT_MILLISECONDS),
             "--",
-            "fork",
-            source_session_id,
+            *native_args,
         ]
         deadline = time.monotonic() + SHELL_READY_TIMEOUT_SECONDS
         while True:
@@ -277,7 +309,12 @@ class ForkWorkflow:
                 "then retry; the incomplete tab was removed."
             )
 
-    def _reported_fork_session(self, pane_id: str, source_session_id: str) -> str | None:
+    def _reported_fork_session(
+        self,
+        pane_id: str,
+        source_session_id: str,
+        agent_kind: str,
+    ) -> str | None:
         response = self.client.json(["agent", "get", pane_id])
         agent = _object(_object(response.get("result"), "agent result").get("agent"), "agent data")
         session = agent.get("agent_session")
@@ -285,12 +322,12 @@ class ForkWorkflow:
             return None
         fork_session_id = _canonical_uuid(session.get("value"))
         if (
-            session.get("agent") != "codex"
+            session.get("agent") != agent_kind
             or session.get("kind") != "id"
-            or session.get("source") != "herdr:codex"
+            or session.get("source") != f"herdr:{agent_kind}"
             or fork_session_id is None
         ):
-            raise ForkError("Herdr reported invalid session metadata for the new Codex fork.")
+            raise ForkError("Herdr reported invalid session metadata for the new agent fork.")
         if fork_session_id == source_session_id:
             raise ForkError("Herdr reported the source session ID for the new pane instead of a fork ID.")
         return fork_session_id
@@ -320,13 +357,32 @@ class ForkWorkflow:
             "The incomplete tab was removed. Check whether Codex remapped the transcript shortcut."
         )
 
-    def _wait_for_picker(self, pane_id: str) -> None:
+    def _wait_for_codex_picker(self, pane_id: str) -> None:
         if self._wait_for_markers(pane_id, PICKER_MARKERS, PICKER_TIMEOUT_SECONDS):
             return
         raise ForkError(
             "The Codex transcript opened, but message selection did not appear after Esc. "
             "The incomplete tab was removed. Check whether Codex changed its backtrack controls."
         )
+
+    def _wait_for_claude_picker(self, pane_id: str) -> None:
+        if self._wait_for_markers(pane_id, CLAUDE_PICKER_MARKERS, PICKER_TIMEOUT_SECONDS):
+            return
+        raise ForkError(
+            "The Claude fork started, but its Claude Rewind picker did not appear after Esc Esc. "
+            "The incomplete tab was removed. Confirm the source session has at least one prompt "
+            "and check whether Claude changed its rewind controls."
+        )
+
+    def _open_message_picker(self, pane_id: str, agent_kind: str) -> None:
+        if agent_kind == "codex":
+            self.client.json(["agent", "send-keys", pane_id, "ctrl+t"])
+            self._wait_for_transcript(pane_id)
+            self.client.json(["agent", "send-keys", pane_id, "esc"])
+            self._wait_for_codex_picker(pane_id)
+            return
+        self.client.json(["agent", "send-keys", pane_id, "esc", "esc"])
+        self._wait_for_claude_picker(pane_id)
 
     def _cleanup(self) -> None:
         tab_id = self.created_tab_id
@@ -377,7 +433,17 @@ def run(env: Mapping[str, str]) -> ForkResult:
         codex_home = _nonempty_string(env.get("CODEX_HOME"))
         if codex_home and (not Path(codex_home).is_absolute() or not Path(codex_home).is_dir()):
             raise ForkError("CODEX_HOME is set but is not an existing absolute directory.")
-        return ForkWorkflow(client, context, codex_home=codex_home).execute()
+        claude_config_dir = _nonempty_string(env.get("CLAUDE_CONFIG_DIR"))
+        if claude_config_dir and (
+            not Path(claude_config_dir).is_absolute() or not Path(claude_config_dir).is_dir()
+        ):
+            raise ForkError("CLAUDE_CONFIG_DIR is set but is not an existing absolute directory.")
+        return ForkWorkflow(
+            client,
+            context,
+            codex_home=codex_home,
+            claude_config_dir=claude_config_dir,
+        ).execute()
     except ForkError as exc:
         _notify_failure(client, str(exc))
         raise

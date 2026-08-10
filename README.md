@@ -1,13 +1,14 @@
-# Herdr: Fork Codex from message
+# Herdr: Fork agent from message
 
-A local-only Herdr action that forks the Codex session in the focused pane into a new tab, then opens Codex's native transcript picker. The original pane is never resumed, rewritten, sent keys, or closed.
+A local-only Herdr action that forks the Codex or Claude Code session in the focused pane into a new tab, then opens that agent's native earlier-message picker. The original pane is never resumed, rewritten, sent keys, or closed.
 
 ## Requirements
 
 - Herdr 0.8.0 or newer
 - Codex CLI 0.146.1 or a compatible version with `codex fork <SESSION_ID>` and the native transcript overlay
+- Claude Code 2.1.220 or a compatible version with `--resume <SESSION_ID> --fork-session` and native Rewind
 - Python 3.10 or newer
-- Herdr's Codex integration installed and reporting `agent_session` metadata
+- Herdr's Codex and/or Claude integration installed and reporting `agent_session` metadata
 
 Check the integration with:
 
@@ -15,10 +16,11 @@ Check the integration with:
 herdr integration status
 ```
 
-If Codex is missing, install the integration and restart Codex:
+Install any missing or outdated integration, then restart that agent:
 
 ```sh
 herdr integration install codex
+herdr integration install claude
 ```
 
 ## Install or link locally
@@ -31,7 +33,7 @@ herdr plugin link "$PWD"
 herdr plugin action list --plugin local.codex-fork-from-message
 ```
 
-The action is named **Fork Codex from message** and its qualified ID is `local.codex-fork-from-message.fork`.
+The action is named **Fork agent from message** and its qualified ID remains `local.codex-fork-from-message.fork`.
 
 To add a keybinding, first inspect `~/.config/herdr/config.toml` and `herdr --default-config` for conflicts. Then append a free binding such as:
 
@@ -40,7 +42,7 @@ To add a keybinding, first inspect `~/.config/herdr/config.toml` and `herdr --de
 key = "prefix+f"
 type = "plugin_action"
 command = "local.codex-fork-from-message.fork"
-description = "Fork Codex from message"
+description = "Fork agent from message"
 ```
 
 Validate and reload the configuration:
@@ -52,20 +54,20 @@ herdr server reload-config
 
 ## Use
 
-1. Focus a Herdr pane running the Codex conversation to branch.
-2. Invoke **Fork Codex from message** through its configured keybinding or run:
+1. Focus a Herdr pane running the Codex or Claude conversation to branch.
+2. Invoke **Fork agent from message** through its configured keybinding or run:
 
    ```sh
    herdr plugin action invoke local.codex-fork-from-message.fork
    ```
 
-3. The action verifies Herdr's exact Codex session ID, creates a labeled tab in the same workspace and cwd, and runs `codex fork <SESSION_ID>` through Herdr's agent launcher.
-4. After the native fork reaches its TUI, the action sends `Ctrl+T`, waits for the transcript, sends `Esc`, and verifies that Codex's message-selection controls appeared before focusing the new tab.
-5. The latest user message is highlighted. Press `Esc` or left to choose an older message, right to choose a newer one, and Enter to confirm. Codex performs the native rollback inside the already-forked session.
+3. The action detects the agent, verifies Herdr's exact trusted session ID, and creates a labeled tab in the same workspace and cwd.
+4. For Codex, it runs `codex fork <SESSION_ID>`, opens the transcript with `Ctrl+T`, enters selection with `Esc`, and waits for the selection controls before focusing the tab. Press `Esc` or left for an older message, right for a newer one, and Enter to confirm.
+5. For Claude, it runs `claude --resume <SESSION_ID> --fork-session`, opens Rewind with `Esc`, `Esc`, and waits for the checkpoint list before focusing the tab. Use up/down and Enter to choose a prompt, then choose **Restore conversation** to rewind only the forked conversation while preserving the current files. Choosing either code restore option intentionally changes files in the shared cwd.
 
 ## Failure behavior
 
-The action refuses to continue when the focused pane is not Codex, Herdr did not report a trusted Codex session ID, the cwd is unusable, Codex fails to launch, Herdr reports the source ID in the new pane, or the transcript picker does not appear. It shows a Herdr notification and writes the full error to the plugin command log:
+The action refuses to continue when the focused pane is not Codex or Claude, Herdr did not report the matching trusted session ID, the cwd is unusable, the native fork fails to launch, Herdr reports the source ID in the new pane, or the expected picker does not appear. It shows a Herdr notification and writes the full error to the plugin command log:
 
 ```sh
 herdr plugin log list --plugin local.codex-fork-from-message --limit 5
@@ -80,6 +82,9 @@ Codex can pause new sessions when hooks need trust review. The action detects th
 - Codex 0.146.1 exposes native forking by session ID but no supported API for selecting an exact earlier message. The user therefore chooses the turn in Codex's native transcript/backtrack UI.
 - Codex 0.146.1 defers the fork's `SessionStart` hook until the first post-fork prompt. The action cannot require the new Herdr session ID before opening the picker; it instead relies on the successful native `codex fork <exact-session-id>` command and picker rendering. If an ID is already reported, the action verifies that it differs from the source.
 - Picker verification recognizes Codex 0.146.1's transcript `edit prev` hint and its selection-only `edit next` / `edit message` hints. A future Codex release that changes these controls will fail visibly and clean up the incomplete tab instead of pretending success.
+- Claude selection is native Rewind inside a native `--fork-session` branch. Rewind presents code-restoration choices as well as conversation restoration; the plugin deliberately leaves that safety-sensitive choice to the user.
+- Claude's fork and Rewind UI are local and can open while logged out, but continuing with a model prompt requires a valid Claude login, subscription, API key, or supported third-party provider.
+- A non-default `CLAUDE_CONFIG_DIR` is preserved when it is available to the plugin process. A value set only inside the source shell cannot currently be recovered through Herdr's pane metadata. The normal `~/.claude` configuration is supported.
 - Herdr plugin actions are detached commands. Detailed errors live in Herdr's local plugin log; no telemetry, network requests, or developer callbacks are used.
 
 ## Test
@@ -88,7 +93,7 @@ Codex can pause new sessions when hooks need trust review. The action detects th
 ./scripts/check.sh
 ```
 
-The standard-library test suite covers the exact-session launch, command ordering, unsupported panes, absent or hostile session IDs, deferred and mismatched fork metadata, shell-start races, hook review, picker timeout, and safe cleanup. For a live disposable verification, start a new Codex conversation in a temporary Herdr tab, invoke the action from that tab, confirm the picker is visible, submit a disposable post-fork prompt, confirm the new session ID differs, and close both disposable tabs afterward.
+The standard-library test suite covers native Codex and Claude launch arguments, command ordering, unsupported panes, absent or hostile session IDs, mismatched integration sources, deferred and mismatched fork metadata, shell-start races, hook review, picker timeouts, and safe cleanup. Live verification should use a disposable source session, confirm the fork reports a different session ID and shows the native picker, verify the source ID remains unchanged, and close both disposable tabs afterward.
 
 ## Uninstall
 

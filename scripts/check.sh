@@ -18,3 +18,6 @@ fi
 if command -v codex >/dev/null 2>&1; then
     codex --version
 fi
+if command -v claude >/dev/null 2>&1; then
+    claude --version
+fi
