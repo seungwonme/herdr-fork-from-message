@@ -43,6 +43,9 @@ class FakeClient:
         self.show_claude_picker = True
         self.show_hook_review = False
         self.missing_root_pane = False
+        self.layout_width = 140
+        self.layout_height = 50
+        self.created_pane_id = "w1:p2"
 
     def json(self, args, timeout=15):
         command = tuple(args)
@@ -71,6 +74,42 @@ class FakeClient:
         if command[:2] == ("tab", "create"):
             root_pane = {} if self.missing_root_pane else {"pane_id": "w1:p2"}
             return {"result": {"tab": {"tab_id": "w1:t2"}, "root_pane": root_pane}}
+        if command[:2] == ("pane", "layout"):
+            return {
+                "result": {
+                    "layout": {
+                        "panes": [
+                            {
+                                "pane_id": "w1:p1",
+                                "rect": {
+                                    "width": self.layout_width,
+                                    "height": self.layout_height,
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        if command[:2] == ("pane", "split"):
+            self.created_pane_id = "w1:p2"
+            return {
+                "result": {
+                    "pane": {
+                        "pane_id": self.created_pane_id,
+                        "tab_id": "w1:t1",
+                        "workspace_id": "w1",
+                    }
+                }
+            }
+        if command[:2] == ("workspace", "create"):
+            self.created_pane_id = "w2:p1"
+            return {
+                "result": {
+                    "workspace": {"workspace_id": "w2"},
+                    "tab": {"tab_id": "w2:t1"},
+                    "root_pane": {"pane_id": self.created_pane_id},
+                }
+            }
         if command[:2] == ("agent", "start"):
             if self.start_busy_attempts:
                 self.start_busy_attempts -= 1
@@ -94,9 +133,17 @@ class FakeClient:
                     }
                 }
             }
-        if command[:2] == ("tab", "close") and self.fail_close:
+        if command[0] in ("tab", "pane", "workspace") and command[1] == "close" and self.fail_close:
             raise MODULE.ForkError("simulated close failure")
-        if command[:2] in (("agent", "send-keys"), ("tab", "focus"), ("tab", "close")):
+        if command[:2] in (
+            ("agent", "send-keys"),
+            ("agent", "focus"),
+            ("tab", "focus"),
+            ("tab", "close"),
+            ("pane", "close"),
+            ("workspace", "focus"),
+            ("workspace", "close"),
+        ):
             return {"result": {"type": "ok"}}
         raise AssertionError(f"unexpected command: {command}")
 
@@ -108,13 +155,19 @@ class FakeClient:
         if self.show_hook_review:
             return "Hooks need review"
         if self.agent == "claude":
-            picker_opened = ("agent", "send-keys", "w1:p2", "esc", "esc") in self.commands
+            picker_opened = (
+                "agent",
+                "send-keys",
+                self.created_pane_id,
+                "esc",
+                "esc",
+            ) in self.commands
             if picker_opened and self.show_claude_picker:
                 return "Rewind\nRestore the code and/or conversation to the point before…"
             return "Claude ready"
         if not self.show_picker:
             return "Codex ready"
-        if ("agent", "send-keys", "w1:p2", "esc") in self.commands:
+        if ("agent", "send-keys", self.created_pane_id, "esc") in self.commands:
             if self.show_backtrack_selection:
                 return "Esc/Left to edit prev  Right to edit next  Enter to edit message"
             return "Esc to edit prev"
@@ -165,6 +218,43 @@ class ForkWorkflowTests(unittest.TestCase):
         self.assertLess(picker_index, focus_index)
         self.assertNotIn(("agent", "send-keys", "w1:p2", "ctrl+t"), client.commands)
         self.assertNotIn(("tab", "close", "w1:t1"), client.commands)
+
+    def test_pane_destination_splits_wide_source_right_and_focuses_new_pane(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd)
+            result = MODULE.ForkWorkflow(client, context(cwd), destination="pane").execute()
+
+        split = next(command for command in client.commands if command[:2] == ("pane", "split"))
+        self.assertIn(("--direction", "right"), tuple(zip(split, split[1:])))
+        self.assertIn(("--cwd", cwd), tuple(zip(split, split[1:])))
+        self.assertIn("--no-focus", split)
+        self.assertEqual(result.tab_id, "w1:t1")
+        self.assertIn(("agent", "focus", "w1:p2"), client.commands)
+        self.assertFalse(any(command[:2] == ("tab", "create") for command in client.commands))
+
+    def test_pane_destination_splits_narrow_source_down(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd)
+            client.layout_width = 80
+            client.layout_height = 50
+            MODULE.ForkWorkflow(client, context(cwd), destination="pane").execute()
+
+        split = next(command for command in client.commands if command[:2] == ("pane", "split"))
+        self.assertIn(("--direction", "down"), tuple(zip(split, split[1:])))
+
+    def test_workspace_destination_creates_and_focuses_new_workspace(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd, agent="claude")
+            result = MODULE.ForkWorkflow(client, context(cwd), destination="workspace").execute()
+
+        create = next(
+            command for command in client.commands if command[:2] == ("workspace", "create")
+        )
+        self.assertIn(("--cwd", cwd), tuple(zip(create, create[1:])))
+        self.assertIn("--no-focus", create)
+        self.assertEqual(result.tab_id, "w2:t1")
+        self.assertIn(("workspace", "focus", "w2"), client.commands)
+        self.assertFalse(any(command[:2] == ("tab", "create") for command in client.commands))
 
     def test_explicit_codex_home_is_preserved_in_new_tab(self):
         with tempfile.TemporaryDirectory() as cwd, tempfile.TemporaryDirectory() as codex_home:
@@ -239,6 +329,24 @@ class ForkWorkflowTests(unittest.TestCase):
         self.assertIn(("tab", "close", "w1:t2"), client.commands)
         self.assertNotIn(("tab", "close", "w1:t1"), client.commands)
 
+    def test_pane_launch_failure_closes_only_new_pane(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd)
+            client.fail_start = True
+            with self.assertRaisesRegex(MODULE.ForkError, "launch failure"):
+                MODULE.ForkWorkflow(client, context(cwd), destination="pane").execute()
+        self.assertIn(("pane", "close", "w1:p2"), client.commands)
+        self.assertNotIn(("tab", "close", "w1:t1"), client.commands)
+
+    def test_workspace_launch_failure_closes_only_new_workspace(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd)
+            client.fail_start = True
+            with self.assertRaisesRegex(MODULE.ForkError, "launch failure"):
+                MODULE.ForkWorkflow(client, context(cwd), destination="workspace").execute()
+        self.assertIn(("workspace", "close", "w2"), client.commands)
+        self.assertNotIn(("tab", "close", "w1:t1"), client.commands)
+
     def test_incomplete_tab_response_is_cleaned_up_by_returned_tab_id(self):
         with tempfile.TemporaryDirectory() as cwd:
             client = FakeClient(cwd)
@@ -294,7 +402,9 @@ class ForkWorkflowTests(unittest.TestCase):
             client = FakeClient(cwd, agent="claude")
             client.show_claude_picker = False
             with patch.object(MODULE, "PICKER_TIMEOUT_SECONDS", -1):
-                with self.assertRaisesRegex(MODULE.ForkError, "Claude Rewind picker did not appear"):
+                with self.assertRaisesRegex(
+                    MODULE.ForkError, "Claude Rewind picker did not appear"
+                ):
                     MODULE.ForkWorkflow(client, context(cwd)).execute()
         self.assertIn(("tab", "close", "w1:t2"), client.commands)
 
