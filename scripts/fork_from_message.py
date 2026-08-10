@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-PLUGIN_ID = "i-amgeek.fork-from-message"
+PLUGIN_ID = "dmangla3.fork-from-message"
 ACTION_TITLE = "Fork agent from message"
 SUPPORTED_AGENTS = {"codex": "Codex", "claude": "Claude"}
 DESTINATIONS = ("tab", "pane", "workspace")

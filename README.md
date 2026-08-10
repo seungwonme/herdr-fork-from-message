@@ -1,6 +1,6 @@
 # Fork from Message for Herdr
 
-[![CI](https://github.com/i-amgeek/herdr-fork-from-message/actions/workflows/ci.yml/badge.svg)](https://github.com/i-amgeek/herdr-fork-from-message/actions/workflows/ci.yml)
+[![CI](https://github.com/dmangla3/herdr-fork-from-message/actions/workflows/ci.yml/badge.svg)](https://github.com/dmangla3/herdr-fork-from-message/actions/workflows/ci.yml)
 
 Fork the Codex or Claude Code conversation in the focused [Herdr](https://herdr.dev)
 pane, choose an earlier user message with the agent's native picker, and continue in a
@@ -37,13 +37,13 @@ supported third-party provider.
 Install directly from GitHub:
 
 ```sh
-herdr plugin install i-amgeek/herdr-fork-from-message
+herdr plugin install dmangla3/herdr-fork-from-message
 ```
 
 Check that Herdr recognizes the plugin and your agent integration:
 
 ```sh
-herdr plugin list --plugin i-amgeek.fork-from-message
+herdr plugin list --plugin dmangla3.fork-from-message
 herdr integration status
 ```
 
@@ -59,16 +59,16 @@ herdr integration install claude
 
 | Action | Qualified action ID | Destination |
 | --- | --- | --- |
-| **Fork agent from message** | `i-amgeek.fork-from-message.fork` | New tab |
-| **Fork agent beside current pane** | `i-amgeek.fork-from-message.fork-pane` | Split pane |
-| **Fork agent into new workspace** | `i-amgeek.fork-from-message.fork-workspace` | New workspace |
+| **Fork agent from message** | `dmangla3.fork-from-message.fork` | New tab |
+| **Fork agent beside current pane** | `dmangla3.fork-from-message.fork-pane` | Split pane |
+| **Fork agent into new workspace** | `dmangla3.fork-from-message.fork-workspace` | New workspace |
 
 Invoke an action from Herdr's action UI, or from the CLI:
 
 ```sh
-herdr plugin action invoke fork --plugin i-amgeek.fork-from-message
-herdr plugin action invoke fork-pane --plugin i-amgeek.fork-from-message
-herdr plugin action invoke fork-workspace --plugin i-amgeek.fork-from-message
+herdr plugin action invoke fork --plugin dmangla3.fork-from-message
+herdr plugin action invoke fork-pane --plugin dmangla3.fork-from-message
+herdr plugin action invoke fork-workspace --plugin dmangla3.fork-from-message
 ```
 
 ## Optional keybindings
@@ -80,13 +80,13 @@ The plugin does not overwrite or reserve keybindings. Check
 [[keys.command]]
 key = "prefix+f"
 type = "plugin_action"
-command = "i-amgeek.fork-from-message.fork"
+command = "dmangla3.fork-from-message.fork"
 description = "Fork agent from message"
 
 [[keys.command]]
 key = "prefix+shift+f"
 type = "plugin_action"
-command = "i-amgeek.fork-from-message.fork-pane"
+command = "dmangla3.fork-from-message.fork-pane"
 description = "Fork agent beside current pane"
 ```
 
@@ -157,7 +157,7 @@ narrow or tall pane. This avoids creating unusably narrow columns.
 Inspect the latest local action errors:
 
 ```sh
-herdr plugin log list --plugin i-amgeek.fork-from-message --limit 5
+herdr plugin log list --plugin dmangla3.fork-from-message --limit 5
 ```
 
 Common failures are explicit:
@@ -189,7 +189,7 @@ delete agent-owned session data.
 ## Local development
 
 ```sh
-git clone https://github.com/i-amgeek/herdr-fork-from-message.git
+git clone https://github.com/dmangla3/herdr-fork-from-message.git
 cd herdr-fork-from-message
 ./scripts/check.sh
 herdr plugin link "$PWD"
@@ -215,13 +215,13 @@ herdr server reload-config
 For a GitHub installation:
 
 ```sh
-herdr plugin uninstall i-amgeek.fork-from-message
+herdr plugin uninstall dmangla3.fork-from-message
 ```
 
 For a locally linked checkout:
 
 ```sh
-herdr plugin unlink i-amgeek.fork-from-message
+herdr plugin unlink dmangla3.fork-from-message
 ```
 
 Uninstalling the plugin does not remove Codex or Claude session data.

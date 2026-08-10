@@ -15,5 +15,5 @@ project follows [Semantic Versioning](https://semver.org/).
 - Visible failures and destination-specific cleanup without transcript mutation.
 - A dependency-free test and verification harness.
 
-[Unreleased]: https://github.com/i-amgeek/herdr-fork-from-message/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/i-amgeek/herdr-fork-from-message/releases/tag/v0.3.0
+[Unreleased]: https://github.com/dmangla3/herdr-fork-from-message/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/dmangla3/herdr-fork-from-message/releases/tag/v0.3.0

@@ -192,7 +192,7 @@ class ForkWorkflowTests(unittest.TestCase):
         match = re.search(r'^id = "([^"]+)"$', manifest, re.MULTILINE)
 
         self.assertIsNotNone(match)
-        self.assertEqual(match.group(1), "i-amgeek.fork-from-message")
+        self.assertEqual(match.group(1), "dmangla3.fork-from-message")
         self.assertEqual(MODULE.PLUGIN_ID, match.group(1))
 
     def test_success_forks_exact_session_and_opens_picker_before_focus(self):

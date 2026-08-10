@@ -7,7 +7,7 @@ conversation data, session identities, terminal contents, or arbitrary command
 execution.
 
 Report it privately through the repository's
-[GitHub security advisory form](https://github.com/i-amgeek/herdr-fork-from-message/security/advisories/new).
+[GitHub security advisory form](https://github.com/dmangla3/herdr-fork-from-message/security/advisories/new).
 Include the affected version, agent and Herdr versions, reproduction steps, and
 the expected impact. Do not include real conversation contents or credentials.
 

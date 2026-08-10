@@ -8,7 +8,7 @@ Requirements are Python 3.10 or newer and, for live verification, Herdr 0.8.0
 or newer with Codex and/or Claude Code installed.
 
 ```sh
-git clone https://github.com/i-amgeek/herdr-fork-from-message.git
+git clone https://github.com/dmangla3/herdr-fork-from-message.git
 cd herdr-fork-from-message
 ./scripts/check.sh
 ```
