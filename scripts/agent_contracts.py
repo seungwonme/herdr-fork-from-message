@@ -5,7 +5,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-AGENTS = {"claude": "Claude Code", "codex": "Codex", "omp": "OMP", "gjc": "GJC"}
+AGENTS = {
+    "claude": "Claude Code", "codex": "Codex", "omp": "OMP", "gjc": "GJC",
+    "pi": "Pi", "omo": "OmO", "opencode": "OpenCode", "cursor": "Cursor",
+    "copilot": "GitHub Copilot", "agy": "Antigravity", "hermes": "Hermes",
+}
+PI_FAMILY = ("gjc", "omp", "pi", "omo")
+UNAVAILABLE = {
+    "cursor": "its native /fork requires opening the active source as a writer first; source-preserving offline fork API unavailable",
+    "agy": "its native /fork requires concurrent source resume; no documented offline fork API",
+    "hermes": "native branch omits tool history, and native storage import can repair storage or discard metadata; no verified full-history fork API",
+}
 READ_ONLY_POLICY = """This is an independent READ-ONLY fork, not a delegated worker.
 The inherited conversation is background, not an instruction to resume its tasks.
 Wait for a new question. Answer only the user's new questions. Do not continue old
@@ -25,12 +35,35 @@ VALUE_FLAGS = {
     "codex": ("--model", "-m", "--profile", "-p"),
     "gjc": ("--model", "--mpreset", "--thinking", "--session-dir"),
     "omp": ("--model", "--thinking", "--profile", "--session-dir", "--config"),
+    "pi": ("--model", "--thinking", "--session-dir", "--provider"),
+    "omo": ("--model", "--thinking", "--session-dir", "--provider"),
+    "opencode": ("--server", "--model", "--agent"),
+    "cursor": ("--model",),
+    "agy": ("--model", "--effort", "--project", "--agent"),
+    "copilot": ("--model",),
+    # Verified in the installed hermes_cli/_parser.py top-level and chat parsers.
+    "hermes": ("--model",),
+}
+OMITTED_VALUE_FLAGS = {
+    "--api-key", "--system-prompt", "--append-system-prompt", "--system-prompt-file",
+    "--append-system-prompt-file", "--extension", "-e", "--goal", "--tools", "-t",
+    "--exclude-tools", "--session", "--session-id", "--fork", "--resume", "--conversation",
+    "--name", "-n", "--skill", "--prompt-template", "--theme", "--mcp-config", "--settings",
+    "--permission-mode", "--allowedTools", "--disallowedTools", "--config", "-c",
+    "--mode", "--export", "--tui-mode", "--use-theme",
 }
 ENVIRONMENT_KEYS = {
     "claude": ("CLAUDE_CONFIG_DIR",),
     "codex": ("CODEX_HOME",),
     "gjc": ("GJC_CONFIG_DIR", "GJC_CODING_AGENT_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"),
     "omp": ("PI_CONFIG_DIR", "PI_CODING_AGENT_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"),
+    "pi": ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"),
+    "omo": ("OMO_CODING_AGENT_DIR", "SENPI_CODING_AGENT_DIR", "PI_CODING_AGENT_DIR", "OMO_CODING_AGENT_SESSION_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"),
+    "opencode": ("OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT"),
+    "cursor": ("CURSOR_CONFIG_DIR",),
+    "copilot": ("COPILOT_HOME",),
+    "agy": ("GEMINI_CLI_HOME",),
+    "hermes": ("HERMES_HOME", "HERMES_PROFILE"),
 }
 
 
@@ -47,6 +80,8 @@ class Launch:
 
 def safe_launch_flags(agent: str, argv: Sequence[str]) -> list[str]:
     """Copy only known value flags, never prompts, credentials, or permissions."""
+    if agent not in AGENTS:
+        raise ContractError(f"Unsupported agent: {agent}")
     kept: list[str] = []
     index = 1
     while index < len(argv):
@@ -54,7 +89,9 @@ def safe_launch_flags(agent: str, argv: Sequence[str]) -> list[str]:
         if item == "--":
             break
         flag, separator, inline = item.partition("=")
-        if flag in VALUE_FLAGS[agent]:
+        if agent == "opencode" and item == "--standalone":
+            kept.append(item)
+        elif flag in VALUE_FLAGS[agent]:
             if separator:
                 value = inline
             elif index + 1 < len(argv):
@@ -65,6 +102,10 @@ def safe_launch_flags(agent: str, argv: Sequence[str]) -> list[str]:
             if not value or value.startswith("-") or any(ord(c) < 32 for c in value):
                 raise ContractError(f"Invalid {flag} value in source argv")
             kept.extend((flag, value))
+        elif flag in OMITTED_VALUE_FLAGS and not separator:
+            # A prompt/API-key/extension value can itself look like --model.
+            # Consume it rather than reinterpret excluded text as a selector.
+            index += 1
         index += 1
     return kept
 
@@ -83,18 +124,22 @@ def fork_launch(
 ) -> Launch:
     if agent not in AGENTS:
         raise ContractError(f"Unsupported agent: {agent}")
+    if agent in UNAVAILABLE:
+        raise ContractError(f"Automatic {AGENTS[agent]} fork unavailable: {UNAVAILABLE[agent]}. Source was not resumed or changed")
+    if read_only and agent not in ("claude", "codex", "gjc", "omp"):
+        raise ContractError(f"Read-only mode is not supported for {AGENTS[agent]}: native guard support has not been verified")
     flags = safe_launch_flags(agent, source_argv)
     state = runtime or {}
-    if agent == "gjc" and state.get("session_file"):
+    if agent in PI_FAMILY and state.get("session_file"):
         flags = _without(flags, {"--session-dir"}) + ["--session-dir", str(Path(state["session_file"]).parent)]
     # The live owner descriptor wins over initial process flags after model changes.
     model = state.get("model")
     profile = state.get("profile") if agent == "gjc" else None
     if isinstance(model, str) and model:
-        flags = _without(flags, {"--model", "-m", "--mpreset"})
+        flags = _without(flags, {"--model", "-m", "--mpreset", "--provider"})
         flags.extend(("--mpreset", profile) if isinstance(profile, str) and profile else ("--model", model))
     thinking = state.get("thinking")
-    if agent in READ_TOOLS and isinstance(thinking, str) and thinking not in ("", "inherit"):
+    if agent in PI_FAMILY and isinstance(thinking, str) and thinking not in ("", "inherit"):
         flags = _without(flags, {"--thinking"}) + ["--thinking", thinking]
     env = {key: environment[key] for key in ENVIRONMENT_KEYS[agent] if environment.get(key)}
     for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
@@ -103,18 +148,23 @@ def fork_launch(
     for key in ("HERDR_PANEL_FORK_STATE_DIR", "HERDR_PANEL_FORK_HELPER"):
         if environment.get(key):
             env[key] = environment[key]
-    if agent in READ_TOOLS:
+    command = agent
+    if agent in PI_FAMILY:
         native = ["--fork", reference]
     elif agent == "claude":
         native = ["--resume", reference, "--fork-session"]
-    else:
+    elif agent == "codex":
         native = ["fork", reference]
+    elif agent == "opencode":
+        native = ["mini", "--session", reference, "--fork"]
+    else:
+        native = ["--resume", reference]
     # Explicit zero prevents an inherited read-only shell environment from
     # silently restricting the normal fork. Native permissions otherwise apply.
     env["HERDR_PANEL_FORK_READ_ONLY"] = "1" if read_only else "0"
     env["HERDR_PANEL_FORK_AGENT"] = agent
     if not read_only:
-        return Launch(tuple([agent, *native, *flags]), env, "native permissions; shared checkout")
+        return Launch(tuple([command, *native, *flags]), env, "native permissions; shared checkout")
     if agent == "claude":
         flags.extend([
             "--tools", "Read,Grep,Glob", "--permission-mode", "plan",
@@ -157,7 +207,7 @@ def fork_launch(
             flags.extend(("--no-extensions", "--extension", str(bridge), "--config", str(omp_overlay),
                           "--append-system-prompt", " ".join(READ_ONLY_POLICY.split())))
         restrictions = "owner bridge denies every non-read tool; inherited goals paused"
-    return Launch(tuple([agent, *native, *flags]), env, restrictions)
+    return Launch(tuple([command, *native, *flags]), env, restrictions)
 
 
 def _without(flags: list[str], names: set[str]) -> list[str]:
