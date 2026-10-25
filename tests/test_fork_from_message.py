@@ -11,7 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fork_from_message as module
 from agent_contracts import ContractError, QUESTION_POLICY, fork_launch, safe_launch_flags
-from runtime_registry import RegistryError, read_record, write_record
+from runtime_registry import RegistryError, read_record, state_root, write_record
 
 SOURCE = "019fe92d-2396-7f40-8dfe-bdb1ae3d4e27"
 CHILD = "019fe92e-1111-7222-8333-444455556666"
@@ -250,6 +250,13 @@ class WorkflowTests(unittest.TestCase):
 
 
 class RegistryTests(unittest.TestCase):
+    def test_runtime_and_plugin_state_use_herdr_state_root_not_config_root(self):
+        with patch("runtime_registry.Path.home", return_value=Path("/home/test")):
+            self.assertEqual(state_root({}), Path("/home/test/.local/state/herdr/plugins/seungwonme.question-fork"))
+            expected = Path("/state/herdr/plugins/seungwonme.question-fork")
+            self.assertEqual(state_root({"XDG_STATE_HOME": "/state", "XDG_CONFIG_HOME": "/wrong"}), expected)
+            self.assertEqual(state_root({"HERDR_PLUGIN_STATE_DIR": str(expected)}), expected)
+
     def test_exact_binding_and_private_permissions(self):
         with tempfile.TemporaryDirectory() as cwd:
             root = Path(cwd)
