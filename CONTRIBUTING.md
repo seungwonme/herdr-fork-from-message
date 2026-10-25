@@ -23,9 +23,13 @@ The project intentionally has no third-party runtime or test dependencies.
 4. Run `./scripts/check.sh`.
 5. Review the diff for unrelated changes before opening a pull request.
 
-Live tests must use a disposable session. Verify the picker appears in the new
-destination, the source session remains open with the same ID, and only the
-disposable topology is removed afterward.
+Live tests must reuse one disposable tab, with one source and at most one child
+pane at a time. Record the owned tab/pane IDs before launching. Verify the child
+and unchanged source identity, collect the evidence, then close the owned child
+before the next case. On failure, inspect and collect the preserved destination
+before cleaning it up; do not accumulate failed panes. Close the owned source and
+tab at the end, and verify unrelated panes and focus are unchanged. Never close
+a pre-existing user pane or leave a test agent running after evidence collection.
 
 Use a conventional commit subject such as `fix: handle changed picker marker`.
 
