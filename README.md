@@ -15,7 +15,28 @@ The default is the current point in the conversation, not an earlier-message pic
 | 일반 분기 (원래 권한 유지) | `seungwonme.question-fork.fork` | Native fork, not read-only |
 | 과거 메시지에서 분기 (Claude/Codex) | `seungwonme.question-fork.from-message` | Native historical picker |
 
-Use the focused pane's context menu. No keybindings are installed or overwritten.
+Herdr 0.9.5's pane context menu does **not** list plugin actions. Switching the
+right-click passthrough setting does not invoke this plugin. Use a configured
+shortcut while the source conversation pane is focused, or the CLI below.
+
+The approved local setup uses **Ctrl+B, release, then F** (`prefix+f` with the
+default Herdr prefix). This opens one additional question pane automatically;
+do not create an empty pane first. The plugin itself never changes keybindings.
+To configure this shortcut, add one block to `~/.config/herdr/config.toml` after
+checking for conflicts:
+
+```toml
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "seungwonme.question-fork.question"
+description = "질문용 분기 (오른쪽)"
+```
+
+Then run `herdr config check` and `herdr --session default server reload-config`.
+No server restart is required. Already-running GJC/OMP processes still need their
+runtime bridge loaded before they can supply a trusted session identity; changing
+the Herdr shortcut does not load an extension into an existing agent process.
 
 ```sh
 herdr plugin action invoke question --plugin seungwonme.question-fork
