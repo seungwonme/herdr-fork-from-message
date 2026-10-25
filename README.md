@@ -64,7 +64,7 @@ after `/new`, `/resume`, `/fork` or `/tree`, the bridge invalidates its registra
 Restart that process with the desired session before forking again. It refuses stale
 identity rather than silently cloning the predecessor.
 
-State lives at `~/.config/herdr/plugins/state/seungwonme.question-fork/owners/`, or the
+State lives at `~/.local/state/herdr/plugins/seungwonme.question-fork/owners/`, or the
 Herdr plugin state directory. `HERDR_QUESTION_STATE_DIR` explicitly relocates it.
 
 ## Question boundaries

@@ -24,7 +24,7 @@ def state_root(env: Mapping[str, str]) -> Path:
     if configured:
         path = Path(configured)
     else:
-        path = Path(env.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "herdr/plugins/state" / PLUGIN_ID
+        path = Path(env.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "herdr/plugins" / PLUGIN_ID
     if not path.is_absolute():
         raise RegistryError("Plugin state directory must be absolute")
     return path
