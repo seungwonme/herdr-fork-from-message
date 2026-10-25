@@ -1,26 +1,28 @@
-# Question Fork for Herdr
+# Panel Fork for Herdr
 
 Personal fork of [dmangla3/herdr-fork-from-message](https://github.com/dmangla3/herdr-fork-from-message), MIT.
-One Herdr action opens an independent question-only copy of the current Claude Code,
+One Herdr action opens an independent copy of the current Claude Code,
 Codex, OMP, or GJC conversation. The parent receives no keystrokes or automatic replies.
 The default is the current point in the conversation, not an earlier-message picker.
+Normal forks use the agent's native permissions and tools. They are not restricted
+to questions or read-only access. Read-only mode is a separate, explicit option.
 
 ## Actions
 
 | Action | Qualified ID | Behavior |
 | --- | --- | --- |
-| 질문용 분기 (오른쪽) | `seungwonme.question-fork.question` | Read-only question split |
-| 질문용 분기 (아래) | `seungwonme.question-fork.question-down` | Read-only question split below |
-| 질문용 분기 (새 탭) | `seungwonme.question-fork.question-tab` | Read-only question tab |
-| 일반 분기 (원래 권한 유지) | `seungwonme.question-fork.fork` | Native fork, not read-only |
-| 과거 메시지에서 분기 (Claude/Codex) | `seungwonme.question-fork.from-message` | Native historical picker |
+| Panel Fork (오른쪽) | `seungwonme.panel-fork.fork` | Native fork in a new panel, default |
+| Panel Fork (아래) | `seungwonme.panel-fork.fork-down` | Native fork below |
+| Panel Fork (새 탭) | `seungwonme.panel-fork.fork-tab` | Native fork in a new tab |
+| Panel Fork (읽기 전용) | `seungwonme.panel-fork.read-only` | Optional restricted fork |
+| Panel Fork from Message (Claude/Codex) | `seungwonme.panel-fork.from-message` | Native historical picker |
 
 Herdr 0.9.5's pane context menu does **not** list plugin actions. Switching the
 right-click passthrough setting does not invoke this plugin. Use a configured
 shortcut while the source conversation pane is focused, or the CLI below.
 
 The approved local setup uses **Ctrl+B, release, then F** (`prefix+f` with the
-default Herdr prefix). This opens one additional question pane automatically;
+default Herdr prefix). This opens one additional forked panel automatically;
 do not create an empty pane first. The plugin itself never changes keybindings.
 To configure this shortcut, add one block to `~/.config/herdr/config.toml` after
 checking for conflicts:
@@ -29,8 +31,8 @@ checking for conflicts:
 [[keys.command]]
 key = "prefix+f"
 type = "plugin_action"
-command = "seungwonme.question-fork.question"
-description = "질문용 분기 (오른쪽)"
+command = "seungwonme.panel-fork.fork"
+description = "Panel Fork (오른쪽)"
 ```
 
 Then run `herdr config check` and `herdr --session default server reload-config`.
@@ -39,7 +41,7 @@ runtime bridge loaded before they can supply a trusted session identity; changin
 the Herdr shortcut does not load an extension into an existing agent process.
 
 ```sh
-herdr plugin action invoke question --plugin seungwonme.question-fork
+herdr plugin action invoke fork --plugin seungwonme.panel-fork
 ```
 
 For automation, select the server and pane explicitly instead of relying on focus:
@@ -60,8 +62,8 @@ herdr --session default plugin link ~/.agents/plugins/herdr-fork-from-message
 ```
 
 Claude and Codex need their Herdr integration enabled in the **parent**. Do not turn
-off parent hooks before its session identity has been reported. The Claude question
-child disables hooks and receives a new explicit `--session-id`.
+off parent hooks before its session identity has been reported. Every Claude fork
+receives a new explicit `--session-id`. Only the optional read-only mode disables hooks.
 
 ### GJC and OMP runtime registration
 
@@ -85,10 +87,17 @@ after `/new`, `/resume`, `/fork` or `/tree`, the bridge invalidates its registra
 Restart that process with the desired session before forking again. It refuses stale
 identity rather than silently cloning the predecessor.
 
-State lives at `~/.local/state/herdr/plugins/seungwonme.question-fork/owners/`, or the
-Herdr plugin state directory. `HERDR_QUESTION_STATE_DIR` explicitly relocates it.
+State lives at `~/.local/state/herdr/plugins/seungwonme.panel-fork/owners/`, or the
+Herdr plugin state directory. `HERDR_PANEL_FORK_STATE_DIR` explicitly relocates it.
 
-## Question boundaries
+## Default fork and optional read-only mode
+
+The default `fork` action adds no tool allowlist, read-only sandbox, question policy,
+goal-pause command, or MCP/hook restrictions. Native agent configuration applies.
+Restored goals or automation can resume according to that agent's own behavior.
+Both panels share the same files; a conversation fork is not a Git worktree.
+
+Only `--mode read-only` or the `read-only` action applies the following restrictions:
 
 - Claude: built-in `Read/Grep/Glob`, plan permissions, no MCP, no hooks, appended policy.
 - Codex: native read-only sandbox, no approval escalation, apps/hooks/multi-agent/shell
@@ -99,8 +108,8 @@ Herdr plugin state directory. `HERDR_QUESTION_STATE_DIR` explicitly relocates it
 - OMP: `read/grep/glob`, explicit guard extension only, per-child goal-disabled overlay;
   all other tool calls are denied, including dynamically introduced tool names.
 
-Question policy is injected only into the child. It tells the child to wait for new
-questions, not resume inherited implementation, and not contact the parent. The checkout
+Read-only policy is injected only into that child. It tells the child not to
+resume inherited implementation or contact the parent. The checkout
 is **shared**, not a Git worktree or OS filesystem sandbox. These controls restrict model
 tools, not arbitrary user terminal commands, runtime code, manually changed permissions,
 or trusted extensions. Do not describe them as complete process isolation.
@@ -124,7 +133,7 @@ A blocked/login/trust/error destination is **preserved**, never automatically cl
 answered. Parent resources are never closed. Failed launches are not replaced by fresh
 conversations. Codex can delay reporting its child ID until its first post-fork prompt;
 that state is reported as `started_identity_pending`, not verified identity.
-Claude uses a new explicit UUID because disabling hooks also disables Herdr ID reporting.
+Claude uses a new explicit UUID; in read-only mode disabled hooks prevent Herdr ID reporting.
 
 The optional earlier-message picker uses native keyboard controls (Codex Ctrl+T then
 Esc; Claude Esc twice). The final selection is manual and shares the checkout. Claude
@@ -140,7 +149,7 @@ Unit tests cover native argv/policy, allowlisted environment, source-session rac
 wrong or missing IDs, startup failures, destination preservation, all placements, stale
 owner records, symlinks, unknown tool denial, and goal gate requirements.
 
-Live QA on macOS/Herdr 0.9.5:
+Native-fork QA previously performed on macOS/Herdr 0.9.5 with the optional restricted mode:
 
 - GJC 0.19.0: distinct child ID, inherited token recall, write request refused and probe
   file absent; parent not sent input.
@@ -151,6 +160,8 @@ Live QA on macOS/Herdr 0.9.5:
 
 No tests send private parent content to a different provider. Fixtures are disposable
 conversations created specifically for QA.
+The default-mode update is covered by manifest-to-CLI tests, unrestricted native argv
+for all four agents, and bridge mutation/navigation tests. It creates no new live QA panes.
 
 ## Remove
 
@@ -158,7 +169,7 @@ Remove the bridge path from the two CLI `extensions` arrays, preserving other en
 and start new processes. Then unlink the plugin:
 
 ```sh
-herdr --session default plugin unlink seungwonme.question-fork
+herdr --session default plugin unlink seungwonme.panel-fork
 ```
 
 The upstream `forkr` plugin can remain installed as a separate alternative. No session

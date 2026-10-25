@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import bridge, { questionGuard } from "../scripts/runtime_bridge";
+import bridge, { readOnlyGuard } from "../scripts/runtime_bridge";
 
 const original = { ...process.env };
 type BridgeAPI = Parameters<typeof bridge>[0];
@@ -19,10 +19,10 @@ afterEach(() => {
 	Object.assign(process.env, original);
 });
 
-describe("question tool boundary", () => {
+describe("optional read-only tool boundary", () => {
 	for (const name of ["read", "search", "find", "ast_grep", "grep", "glob"]) {
 		test(`allows ${name}`, () =>
-			expect(questionGuard({ toolName: name })).toBeUndefined());
+			expect(readOnlyGuard({ toolName: name })).toBeUndefined());
 	}
 	for (const name of [
 		"goal",
@@ -39,7 +39,7 @@ describe("question tool boundary", () => {
 		"",
 	]) {
 		test(`blocks ${name || "missing tool name"}`, () =>
-			expect(questionGuard({ toolName: name })?.block).toBe(true));
+			expect(readOnlyGuard({ toolName: name })?.block).toBe(true));
 	}
 	test("does nothing outside Herdr", () => {
 		delete process.env.HERDR_ENV;
@@ -53,12 +53,12 @@ describe("question tool boundary", () => {
 		});
 		expect(handlers).toEqual([]);
 	});
-	test("GJC refuses a question runtime without authoritative pause control", async () => {
+	test("GJC refuses a read-only runtime without authoritative pause control", async () => {
 		Object.assign(process.env, {
 			HERDR_ENV: "1",
 			HERDR_PANE_ID: "fixture",
-			HERDR_QUESTION_AGENT: "gjc",
-			HERDR_QUESTION_FORK: "1",
+			HERDR_PANEL_FORK_AGENT: "gjc",
+			HERDR_PANEL_FORK_READ_ONLY: "1",
 		});
 		const handlers = new Map<string, Handler>();
 		bridge({
@@ -76,9 +76,9 @@ describe("question tool boundary", () => {
 		Object.assign(process.env, {
 			HERDR_ENV: "1",
 			HERDR_PANE_ID: "fixture",
-			HERDR_QUESTION_AGENT: "gjc",
+			HERDR_PANEL_FORK_AGENT: "gjc",
 		});
-		delete process.env.HERDR_QUESTION_FORK;
+		delete process.env.HERDR_PANEL_FORK_READ_ONLY;
 		const handlers = new Map<string, Handler>();
 		const warnings: string[] = [];
 		bridge({
@@ -98,12 +98,12 @@ describe("question tool boundary", () => {
 		expect(warnings[0]).toContain("invalidated");
 		await handlers.get("session_shutdown")?.({}, context());
 	});
-	test("question forks cancel all in-process identity navigation", async () => {
+	test("read-only forks cancel all in-process identity navigation", async () => {
 		Object.assign(process.env, {
 			HERDR_ENV: "1",
 			HERDR_PANE_ID: "fixture",
-			HERDR_QUESTION_AGENT: "gjc",
-			HERDR_QUESTION_FORK: "1",
+			HERDR_PANEL_FORK_AGENT: "gjc",
+			HERDR_PANEL_FORK_READ_ONLY: "1",
 		});
 		const handlers = new Map<string, Handler>();
 		bridge({
@@ -122,5 +122,37 @@ describe("question tool boundary", () => {
 				cancel: true,
 			});
 		}
+	});
+	test("normal Panel Fork allows mutations and session navigation", async () => {
+		Object.assign(process.env, {
+			HERDR_ENV: "1",
+			HERDR_PANE_ID: "fixture",
+			HERDR_PANEL_FORK_AGENT: "gjc",
+			HERDR_PANEL_FORK_READ_ONLY: "0",
+		});
+		const handlers = new Map<string, Handler>();
+		let changedTools = false;
+		bridge({
+			on: (name, handler) => {
+				handlers.set(name, handler);
+			},
+			getThinkingLevel: () => "high",
+			setActiveTools: async () => {
+				changedTools = true;
+			},
+		});
+		for (const toolName of ["write", "edit", "bash", "goal", "task"]) {
+			expect(
+				await handlers.get("tool_call")?.({ toolName }, context()),
+			).toBeUndefined();
+		}
+		for (const name of [
+			"session_before_switch",
+			"session_before_branch",
+			"session_before_tree",
+		]) {
+			expect(await handlers.get(name)?.({}, context())).toBeUndefined();
+		}
+		expect(changedTools).toBe(false);
 	});
 });
