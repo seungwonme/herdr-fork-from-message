@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Question-only native forks, based on dmangla3/herdr-fork-from-message (MIT)."""
+"""Native Panel Fork, based on dmangla3/herdr-fork-from-message (MIT)."""
 from __future__ import annotations
 
 import argparse
@@ -104,7 +104,7 @@ class ForkResult:
 
 class ForkWorkflow:
     def __init__(self, client: HerdrClient, context: Mapping[str, Any], env: Mapping[str, str],
-                 destination: str = "pane", mode: str = "question", direction: str = "right", focus: bool = True):
+                 destination: str = "pane", mode: str = "fork", direction: str = "right", focus: bool = True):
         self.client, self.context, self.env = client, context, env
         self.destination, self.mode, self.direction, self.focus = destination, mode, direction, focus
         self.target: dict[str, str] | None = None
@@ -137,21 +137,21 @@ class ForkWorkflow:
             reference = native_id(owner["session_id"])
             if owner.get("session_file"):
                 reference = owner["session_file"]
-            if self.mode == "question" and owner.get("bridge_version") != 1:
-                raise ForkError("Question mode requires the runtime guard bridge")
+            if self.mode == "read-only" and owner.get("bridge_version") != 1:
+                raise ForkError("Read-only mode requires the runtime guard bridge")
         else:
             reference = self._native_reference(pane, agent)
         if self.mode == "message" and agent not in ("claude", "codex"):
             raise ForkError("Earlier-message picker supports Claude and Codex only")
-        mcp = self._codex_mcp(process["argv"]) if agent == "codex" and self.mode == "question" else []
+        mcp = self._codex_mcp(process["argv"]) if agent == "codex" and self.mode == "read-only" else []
         environment = {**self.env, **(owner.get("environment", {}) if owner else {})}
         if owner:
             for key in ENVIRONMENT_KEYS[agent]:
                 environment.pop(key, None)
             environment.update(owner.get("environment", {}))
-        environment["HERDR_QUESTION_STATE_DIR"] = str(state_root(self.env))
-        launch = fork_launch(agent, reference, process["argv"], environment, question=self.mode == "question",
-                             bridge=ROOT / "scripts/runtime_bridge.ts", omp_overlay=ROOT / "scripts/question-omp.yml",
+        environment["HERDR_PANEL_FORK_STATE_DIR"] = str(state_root(self.env))
+        launch = fork_launch(agent, reference, process["argv"], environment, read_only=self.mode == "read-only",
+                             bridge=ROOT / "scripts/runtime_bridge.ts", omp_overlay=ROOT / "scripts/read-only-omp.yml",
                              mcp_servers=mcp, runtime=owner)
         expected_child_id = str(uuid.uuid4()) if agent == "claude" else None
         launch_argv = (*launch.argv, "--session-id", expected_child_id) if expected_child_id else launch.argv
@@ -182,7 +182,7 @@ class ForkWorkflow:
         fork_id = self._verify_child(target["pane_id"], agent, owner["session_id"] if owner else reference, expected_child_id)
         if self.mode == "message":
             self._picker(target["pane_id"], agent)
-        self.client.json(["pane", "rename", target["pane_id"], f"Question · {AGENTS[agent]}" if self.mode == "question" else f"Fork · {AGENTS[agent]}"])
+        self.client.json(["pane", "rename", target["pane_id"], f"Panel Fork (read-only) · {AGENTS[agent]}" if self.mode == "read-only" else f"Panel Fork · {AGENTS[agent]}"])
         if self.focus:
             self.client.json(["agent", "focus", target["pane_id"]])
         return ForkResult("ready" if fork_id else "started_identity_pending", source_id,
@@ -205,7 +205,7 @@ class ForkWorkflow:
                 raise ValueError("expected MCP list")
             return [(entry["name"], entry["transport"]["type"]) for entry in entries if isinstance(entry, dict) and isinstance(entry.get("name"), str)]
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            raise ForkError("Cannot enumerate configured Codex MCP servers; refusing question mode") from exc
+            raise ForkError("Cannot enumerate configured Codex MCP servers; refusing read-only mode") from exc
 
     def _create_target(self, source: Mapping[str, Any], cwd: str, environment: Mapping[str, str]) -> dict[str, str]:
         env_args = [part for key, value in environment.items() for part in ("--env", f"{key}={value}")]
@@ -214,7 +214,7 @@ class ForkWorkflow:
                                        "--cwd", cwd, *env_args, "--no-focus"])
             pane = object_value(result.get("pane"), "created pane")
             return {"pane_id": pane["pane_id"], "tab_id": pane["tab_id"], "workspace_id": pane["workspace_id"]}
-        args = [self.destination, "create", "--cwd", cwd, "--label", "Question fork", *env_args, "--no-focus"]
+        args = [self.destination, "create", "--cwd", cwd, "--label", "Panel Fork", *env_args, "--no-focus"]
         if self.destination == "tab":
             args.extend(("--workspace", source["workspace_id"]))
         result = self.client.json(args)
@@ -234,13 +234,13 @@ class ForkWorkflow:
         raise ForkError("New pane has not reached its shell prompt")
 
     def _start_native(self, pane: str, agent: str, arguments: Sequence[str]) -> None:
-        self.client.json(["agent", "start", f"question-{uuid.uuid4().hex[:10]}", "--kind", agent,
+        self.client.json(["agent", "start", f"panel-fork-{uuid.uuid4().hex[:10]}", "--kind", agent,
                           "--pane", pane, "--timeout", str(START_SECONDS * 1000), "--", *arguments], timeout=START_SECONDS + 10)
 
     def _start_shell(self, pane: str, argv: Sequence[str]) -> None:
         # A private POSIX launcher avoids injecting shell syntax into an unknown interactive shell.
         import tempfile
-        fd, filename = tempfile.mkstemp(prefix="herdr-question-", suffix=".sh")
+        fd, filename = tempfile.mkstemp(prefix="herdr-panel-fork-", suffix=".sh")
         path = Path(filename)
         if any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-" for c in filename):
             os.close(fd)
@@ -258,14 +258,14 @@ class ForkWorkflow:
                 raise ForkError("Child requires login, trust, or permission input; no approval was answered")
             if pane.get("agent") == agent:
                 process = foreground(self.client, pane_id, agent)
-                if self.mode == "question" and not ("--tools" in process["argv"] or "--sandbox" in process["argv"]):
-                    raise ForkError("Child process argv does not contain question restrictions")
+                if self.mode == "read-only" and not ("--tools" in process["argv"] or "--sandbox" in process["argv"]):
+                    raise ForkError("Child process argv does not contain read-only restrictions")
                 if agent in ("gjc", "omp"):
                     try:
                         record = read_record(state_root(self.env), self.env.get("HERDR_SOCKET_PATH", ""), pane, process["pid"])
                         child_id = native_id(record["session_id"])
-                        if self.mode == "question" and not record.get("question_ready"):
-                            raise ForkError("Child question guard not ready")
+                        if self.mode == "read-only" and not record.get("read_only_ready"):
+                            raise ForkError("Child read-only guard not ready")
                     except RegistryError:
                         time.sleep(POLL_SECONDS)
                         continue
@@ -307,7 +307,7 @@ def register(client: HerdrClient, env: Mapping[str, str], payload: Mapping[str, 
     cwd = str(Path(payload.get("cwd", "")).resolve())
     if cwd != str(Path(pane.get("foreground_cwd") or pane.get("cwd", "")).resolve()):
         raise ForkError("Registration cwd does not match owner cwd")
-    safe = {key: payload[key] for key in ("model", "profile", "thinking", "session_file", "bridge_version", "question_ready", "registration_valid") if key in payload}
+    safe = {key: payload[key] for key in ("model", "profile", "thinking", "session_file", "bridge_version", "read_only_ready", "registration_valid") if key in payload}
     environment = payload.get("environment", {})
     if not isinstance(environment, dict) or any(key not in ENVIRONMENT_KEYS[kind] for key in environment):
         raise ForkError("Owner registration contains unsupported environment keys")
@@ -324,9 +324,9 @@ def register(client: HerdrClient, env: Mapping[str, str], payload: Mapping[str, 
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Independent native question forks in Herdr")
+    parser = argparse.ArgumentParser(description="Panel Fork: native conversation forks in Herdr")
     parser.add_argument("--destination", choices=DESTINATIONS, default="pane")
-    parser.add_argument("--mode", choices=("question", "fork", "message"), default="question")
+    parser.add_argument("--mode", choices=("fork", "read-only", "message"), default="fork")
     parser.add_argument("--direction", choices=("right", "down"), default="right")
     parser.add_argument("--no-focus", action="store_true")
     parser.add_argument("--pane")
@@ -351,7 +351,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(output, ensure_ascii=False, sort_keys=True))
         return 0
     except (ForkError, RegistryError, ContractError, OSError, ValueError) as exc:
-        print(f"Question fork failed: {exc}", file=sys.stderr)
+        print(f"Panel Fork failed: {exc}", file=sys.stderr)
         return 1
 
 

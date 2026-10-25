@@ -1,38 +1,38 @@
-id = "seungwonme.question-fork"
-name = "Question Fork"
-version = "0.4.0"
+id = "seungwonme.panel-fork"
+name = "Panel Fork"
+version = "0.5.0"
 min_herdr_version = "0.9.5"
-description = "Independent question-only forks for Claude, Codex, OMP and GJC"
+description = "Native conversation forks into a new Herdr panel for Claude, Codex, OMP and GJC"
 platforms = ["macos", "linux"]
 
 [[actions]]
-id = "question"
-title = "질문용 분기 (오른쪽)"
-description = "Keep the parent untouched and open a read-only question fork beside it"
+id = "fork"
+title = "Panel Fork (오른쪽)"
+description = "Fork the current conversation into a new panel with native agent permissions"
 contexts = ["pane"]
 command = ["python3", "scripts/fork_from_message.py", "--destination", "pane"]
 
 [[actions]]
-id = "question-down"
-title = "질문용 분기 (아래)"
+id = "fork-down"
+title = "Panel Fork (아래)"
 contexts = ["pane"]
 command = ["python3", "scripts/fork_from_message.py", "--direction", "down"]
 
 [[actions]]
-id = "question-tab"
-title = "질문용 분기 (새 탭)"
+id = "fork-tab"
+title = "Panel Fork (새 탭)"
 contexts = ["pane"]
 command = ["python3", "scripts/fork_from_message.py", "--destination", "tab"]
 
 [[actions]]
-id = "fork"
-title = "일반 분기 (원래 권한 유지)"
-description = "Independent fork with native permissions; shares the checkout"
+id = "read-only"
+title = "Panel Fork (읽기 전용)"
+description = "Optional restricted fork; not the default Panel Fork action"
 contexts = ["pane"]
-command = ["python3", "scripts/fork_from_message.py", "--mode", "fork"]
+command = ["python3", "scripts/fork_from_message.py", "--mode", "read-only"]
 
 [[actions]]
 id = "from-message"
-title = "과거 메시지에서 분기 (Claude/Codex)"
+title = "Panel Fork from Message (Claude/Codex)"
 contexts = ["pane"]
 command = ["python3", "scripts/fork_from_message.py", "--mode", "message"]

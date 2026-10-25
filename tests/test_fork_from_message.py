@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -10,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fork_from_message as module
-from agent_contracts import ContractError, QUESTION_POLICY, fork_launch, safe_launch_flags
+from agent_contracts import ContractError, READ_ONLY_POLICY, fork_launch, safe_launch_flags
 from runtime_registry import RegistryError, read_record, state_root, write_record
 
 SOURCE = "019fe92d-2396-7f40-8dfe-bdb1ae3d4e27"
@@ -75,8 +77,8 @@ class FakeClient:
 class ContractTests(unittest.TestCase):
     def launch(self, agent, **options):
         return fork_launch(agent, SOURCE, options.pop("argv", [agent]), options.pop("env", {}),
-                           question=options.pop("question", True), bridge=Path("/plugin/runtime_bridge.ts"),
-                           omp_overlay=Path("/plugin/question-omp.yml"), **options)
+                           read_only=options.pop("read_only", True), bridge=Path("/plugin/runtime_bridge.ts"),
+                           omp_overlay=Path("/plugin/read-only-omp.yml"), **options)
 
     def test_claude_tools_hooks_mcp_and_prompt_boundary(self):
         args = self.launch("claude").argv
@@ -84,7 +86,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(args[args.index("--tools") + 1], "Read,Grep,Glob")
         self.assertIn("--strict-mcp-config", args)
         self.assertIn('{"disableAllHooks":true}', args)
-        self.assertIn(" ".join(QUESTION_POLICY.split()), args)
+        self.assertIn(" ".join(READ_ONLY_POLICY.split()), args)
         self.assertNotIn("--dangerously-skip-permissions", args)
 
     def test_codex_read_only_never_approval_and_all_mcp_disabled(self):
@@ -114,7 +116,7 @@ class ContractTests(unittest.TestCase):
         args = self.launch("omp").argv
         self.assertIn("--no-extensions", args)
         self.assertIn("/plugin/runtime_bridge.ts", args)
-        self.assertIn("/plugin/question-omp.yml", args)
+        self.assertIn("/plugin/read-only-omp.yml", args)
         self.assertIn("read,grep,glob", args)
 
     def test_secrets_and_parent_goal_and_prompts_never_copied(self):
@@ -130,9 +132,18 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn("TOKEN", launch.environment)
         self.assertNotIn("GJC_MASTER_CAPABILITY", launch.environment)
 
-    def test_fork_mode_has_no_question_restrictions(self):
-        args = self.launch("codex", question=False).argv
-        self.assertEqual(args, ("codex", "fork", SOURCE))
+    def test_normal_fork_has_no_added_restrictions_for_any_agent(self):
+        expected = {
+            "claude": ("claude", "--resume", SOURCE, "--fork-session"),
+            "codex": ("codex", "fork", SOURCE),
+            "gjc": ("gjc", "--fork", SOURCE),
+            "omp": ("omp", "--fork", SOURCE),
+        }
+        for agent, argv in expected.items():
+            with self.subTest(agent=agent):
+                launch = self.launch(agent, read_only=False, env={"HERDR_PANEL_FORK_READ_ONLY": "1"})
+                self.assertEqual(launch.argv, argv)
+                self.assertEqual(launch.environment["HERDR_PANEL_FORK_READ_ONLY"], "0")
 
     def test_missing_flag_value_is_rejected(self):
         with self.assertRaises(ContractError):
@@ -151,7 +162,7 @@ class WorkflowTests(unittest.TestCase):
         return module.ForkWorkflow(client, {"focused_pane_id": "w:p1", "workspace_id": "w"},
                                    {"HERDR_SOCKET_PATH": "/socket", "HERDR_PLUGIN_STATE_DIR": "/state"}, **options)
 
-    def test_question_split_is_right_and_never_inputs_parent(self):
+    def test_default_panel_fork_is_right_unrestricted_and_never_inputs_parent(self):
         with tempfile.TemporaryDirectory() as cwd:
             client = FakeClient(cwd)
             result = self.workflow(client).execute()
@@ -159,8 +170,19 @@ class WorkflowTests(unittest.TestCase):
         split = next(call for call in client.calls if call[:2] == ("pane", "split"))
         self.assertIn("right", split)
         self.assertIn("--no-focus", split)
+        self.assertNotIn("--tools", client.child_argv)
+        self.assertNotIn("--append-system-prompt", client.child_argv)
+        self.assertIn("native permissions", result.restrictions)
+        self.assertIn(("pane", "rename", "w:p2", "Panel Fork · Claude Code"), client.calls)
         self.assertFalse(any(call[:2] == ("agent", "send-keys") for call in client.calls))
         self.assertFalse(any(call[1:2] == ("close",) for call in client.calls))
+
+    def test_read_only_requires_explicit_mode(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd)
+            self.workflow(client, mode="read-only").execute()
+            self.assertIn("--tools", client.child_argv)
+            self.assertIn("--append-system-prompt", client.child_argv)
 
     def test_each_destination_and_no_focus(self):
         for destination in ("tab", "workspace", "pane"):
@@ -233,7 +255,7 @@ class WorkflowTests(unittest.TestCase):
     def test_gjc_uses_shell_launch_not_unsupported_agent_start(self):
         with tempfile.TemporaryDirectory() as cwd:
             client = FakeClient(cwd, "gjc")
-            records = [dict(session_id=SOURCE, bridge_version=1, environment={"XDG_CACHE_HOME": "/owner-cache"}), dict(session_id=SOURCE), dict(session_id=CHILD, question_ready=True)]
+            records = [dict(session_id=SOURCE, bridge_version=1, environment={"XDG_CACHE_HOME": "/owner-cache"}), dict(session_id=SOURCE), dict(session_id=CHILD, read_only_ready=True)]
             with patch.object(module, "read_record", side_effect=records), patch.object(module.ForkWorkflow, "_start_shell", autospec=True) as start:
                 def launch(workflow, pane, argv):
                     client.child_argv = list(argv)
@@ -249,11 +271,26 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse(any(c[:2] == ("agent", "start") for c in client.calls))
 
 
+class EntrypointTests(unittest.TestCase):
+    def test_manifest_primary_actions_use_the_normal_cli_default(self):
+        manifest = (Path(__file__).resolve().parents[1] / "herdr-plugin.toml").read_text()
+        self.assertIn('id = "seungwonme.panel-fork"', manifest)
+        self.assertIn('name = "Panel Fork"', manifest)
+        blocks = manifest.split("[[actions]]")[1:]
+        for block in blocks:
+            action_id = re.search(r'^id = "([^"]+)"', block, re.MULTILINE).group(1)
+            command = json.loads(re.search(r'^command = (.+)$', block, re.MULTILINE).group(1))
+            with self.subTest(action=action_id), patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_PLUGIN_CONTEXT_JSON": "{}"}), patch.object(module, "ForkWorkflow") as workflow, patch.object(module, "asdict", return_value={}), patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(module.main(command[2:]), 0)
+                mode = workflow.call_args.args[4]
+                self.assertEqual(mode, "read-only" if action_id == "read-only" else "message" if action_id == "from-message" else "fork")
+
+
 class RegistryTests(unittest.TestCase):
     def test_runtime_and_plugin_state_use_herdr_state_root_not_config_root(self):
         with patch("runtime_registry.Path.home", return_value=Path("/home/test")):
-            self.assertEqual(state_root({}), Path("/home/test/.local/state/herdr/plugins/seungwonme.question-fork"))
-            expected = Path("/state/herdr/plugins/seungwonme.question-fork")
+            self.assertEqual(state_root({}), Path("/home/test/.local/state/herdr/plugins/seungwonme.panel-fork"))
+            expected = Path("/state/herdr/plugins/seungwonme.panel-fork")
             self.assertEqual(state_root({"XDG_STATE_HOME": "/state", "XDG_CONFIG_HOME": "/wrong"}), expected)
             self.assertEqual(state_root({"HERDR_PLUGIN_STATE_DIR": str(expected)}), expected)
 

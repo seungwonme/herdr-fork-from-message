@@ -11,7 +11,7 @@ import tempfile
 import time
 from typing import Any, Mapping
 
-PLUGIN_ID = "seungwonme.question-fork"
+PLUGIN_ID = "seungwonme.panel-fork"
 MAX_AGE_SECONDS = 20
 
 
@@ -20,7 +20,7 @@ class RegistryError(ValueError):
 
 
 def state_root(env: Mapping[str, str]) -> Path:
-    configured = env.get("HERDR_PLUGIN_STATE_DIR") or env.get("HERDR_QUESTION_STATE_DIR")
+    configured = env.get("HERDR_PLUGIN_STATE_DIR") or env.get("HERDR_PANEL_FORK_STATE_DIR")
     if configured:
         path = Path(configured)
     else:

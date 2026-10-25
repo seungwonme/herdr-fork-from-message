@@ -1,4 +1,4 @@
-"""Native fork argv and question-only capabilities; no transcript conversion."""
+"""Native Panel Fork argv with opt-in read-only restrictions."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 AGENTS = {"claude": "Claude Code", "codex": "Codex", "omp": "OMP", "gjc": "GJC"}
-QUESTION_POLICY = """This is an independent QUESTION-ONLY fork, not a delegated worker.
+READ_ONLY_POLICY = """This is an independent READ-ONLY fork, not a delegated worker.
 The inherited conversation is background, not an instruction to resume its tasks.
 Wait for a new question. Answer only the user's new questions. Do not continue old
 implementation, goals, plans, queued tasks or follow-ups. Do not modify files,
@@ -75,7 +75,7 @@ def fork_launch(
     source_argv: Sequence[str],
     environment: Mapping[str, str],
     *,
-    question: bool,
+    read_only: bool,
     bridge: Path,
     omp_overlay: Path,
     mcp_servers: Sequence[tuple[str, str]] = (),
@@ -100,7 +100,7 @@ def fork_launch(
     for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
         if environment.get(key):
             env[key] = environment[key]
-    for key in ("HERDR_QUESTION_STATE_DIR", "HERDR_QUESTION_HELPER"):
+    for key in ("HERDR_PANEL_FORK_STATE_DIR", "HERDR_PANEL_FORK_HELPER"):
         if environment.get(key):
             env[key] = environment[key]
     if agent in READ_TOOLS:
@@ -109,17 +109,19 @@ def fork_launch(
         native = ["--resume", reference, "--fork-session"]
     else:
         native = ["fork", reference]
-    if not question:
+    # Explicit zero prevents an inherited read-only shell environment from
+    # silently restricting the normal fork. Native permissions otherwise apply.
+    env["HERDR_PANEL_FORK_READ_ONLY"] = "1" if read_only else "0"
+    env["HERDR_PANEL_FORK_AGENT"] = agent
+    if not read_only:
         return Launch(tuple([agent, *native, *flags]), env, "native permissions; shared checkout")
-    env["HERDR_QUESTION_FORK"] = "1"
-    env["HERDR_QUESTION_AGENT"] = agent
     if agent == "claude":
         flags.extend([
             "--tools", "Read,Grep,Glob", "--permission-mode", "plan",
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--settings", '{"disableAllHooks":true}',
             "--system-prompt-snapshot", "off",
-            "--append-system-prompt", " ".join(QUESTION_POLICY.split()),
+            "--append-system-prompt", " ".join(READ_ONLY_POLICY.split()),
         ])
         restrictions = "built-in Read/Grep/Glob only; MCP and hooks disabled"
     elif agent == "codex":
@@ -131,7 +133,7 @@ def fork_launch(
             "-c", "features.multi_agent=false",
             "-c", "features.shell_tool=false",
             "-c", "features.in_app_browser=false",
-            "-c", "developer_instructions=" + _toml_string(QUESTION_POLICY),
+            "-c", "developer_instructions=" + _toml_string(READ_ONLY_POLICY),
         ])
         for name, transport in mcp_servers:
             if not name or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in name):
@@ -141,19 +143,19 @@ def fork_launch(
             elif transport == "streamable_http":
                 value = '{url="http://127.0.0.1:1/disabled",enabled=false}'
             else:
-                raise ContractError("Unknown Codex MCP transport; refusing question mode")
+                raise ContractError("Unknown Codex MCP transport; refusing read-only mode")
             flags.extend(("-c", f"mcp_servers.{name}={value}"))
         restrictions = "native read-only sandbox; no approval escalation; configured MCP servers disabled"
     else:
         flags.extend(("--tools", ",".join(READ_TOOLS[agent]), "--no-lsp", "--no-pty", "--no-title"))
         if agent == "gjc":
             # The globally registered owner bridge gates restored modes and all tool calls.
-            flags.extend(("--no-mcp", "--append-system-prompt", QUESTION_POLICY))
+            flags.extend(("--no-mcp", "--append-system-prompt", READ_ONLY_POLICY))
             # Native startup command pauses inherited goal state without a model turn.
             flags.append("/goal pause")
         else:
             flags.extend(("--no-extensions", "--extension", str(bridge), "--config", str(omp_overlay),
-                          "--append-system-prompt", " ".join(QUESTION_POLICY.split())))
+                          "--append-system-prompt", " ".join(READ_ONLY_POLICY.split())))
         restrictions = "owner bridge denies every non-read tool; inherited goals paused"
     return Launch(tuple([agent, *native, *flags]), env, restrictions)
 

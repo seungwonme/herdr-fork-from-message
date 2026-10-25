@@ -1,4 +1,0 @@
-# Per-child overlay; does not modify the parent's settings.
-goal:
-  enabled: false
-autoResume: false

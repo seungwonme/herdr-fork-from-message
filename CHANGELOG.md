@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-25
+
+- Rename the plugin to Panel Fork, ID `seungwonme.panel-fork`.
+- Make normal native forks the CLI and primary-action defaults without question-only restrictions.
+- Keep read-only behavior as an explicit separate action and mode.
+- Update the approved Ctrl+B, then f binding and cover all primary actions in regression tests.
+
 ## [0.4.0] - 2026-10-25
 
 - Personal question-fork actions for Claude, Codex, OMP and GJC.
@@ -23,5 +30,5 @@ project follows [Semantic Versioning](https://semver.org/).
 - Visible failures and destination-specific cleanup without transcript mutation.
 - A dependency-free test and verification harness.
 
-[Unreleased]: https://github.com/seungwonme/herdr-fork-from-message/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/seungwonme/herdr-fork-from-message/compare/v0.5.0...HEAD
 [0.3.0]: https://github.com/dmangla3/herdr-fork-from-message/releases/tag/v0.3.0

@@ -23,7 +23,9 @@ The bridge never exports credentials, scans process environments, or rewrites JS
 
 Native process arguments use Herdr's launcher; GJC uses a private temporary POSIX
 script. Failed destinations are preserved so approval/login state is not destroyed.
-Question mode restricts model tools, not arbitrary process filesystem access. The
+Normal Panel Fork uses native permissions, tools, hooks and MCP settings; restored
+goals can resume according to the agent's behavior. Optional read-only mode
+restricts model tools, not arbitrary process filesystem access. The
 checkout is shared. Trusted runtime extensions and manually changed permissions
 remain outside this boundary. Provider calls use the agent's normal configuration
 after the user asks a question; the plugin has no telemetry or remote callbacks.

@@ -30,14 +30,14 @@ type API = {
 const root = dirname(fileURLToPath(import.meta.url));
 const reads = new Set(["read", "search", "find", "ast_grep", "grep", "glob"]);
 const policy =
-	"Independent question-only fork: inherited work is background. Wait for new questions; do not resume prior tasks, change files/memory/settings, create agents/jobs, or contact the parent. The checkout is shared. Only read tools are permitted.";
+	"Independent read-only fork: inherited work is background. Do not resume prior tasks, change files/memory/settings, create agents/jobs, or contact the parent. The checkout is shared. Only read tools are permitted.";
 
-export function questionGuard(event: Event) {
+export function readOnlyGuard(event: Event) {
 	if (!reads.has(event.toolName ?? "")) {
 		return {
 			block: true,
 			reason:
-				"Question-only fork: this tool can mutate state or escape the read-only boundary.",
+				"Read-only fork: this tool can mutate state or escape the read-only boundary.",
 		};
 	}
 }
@@ -45,18 +45,18 @@ export function questionGuard(event: Event) {
 export default function runtimeBridge(api: API) {
 	if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_PANE_ID) return;
 	const agent =
-		process.env.HERDR_QUESTION_AGENT ??
+		process.env.HERDR_PANEL_FORK_AGENT ??
 		(process.execPath.split("/").pop() === "gjc" ? "gjc" : "omp");
-	const question = process.env.HERDR_QUESTION_FORK === "1";
+	const readOnly = process.env.HERDR_PANEL_FORK_READ_ONLY === "1";
 	let current: Context | undefined;
 	let busy = false;
-	let ready = !question;
+	let ready = !readOnly;
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let warned = false;
 	let invalidated = false;
 
 	async function guard(ctx: Context) {
-		if (!question) return;
+		if (!readOnly) return;
 		// Pause through the owning session API, never rewrite its transcript.
 		if (agent === "gjc") {
 			if (!ctx.operateGoal)
@@ -109,7 +109,7 @@ export default function runtimeBridge(api: API) {
 				thinking: api.getThinkingLevel(),
 				environment,
 				bridge_version: 1,
-				question_ready: ready,
+				read_only_ready: ready,
 				registration_valid: !invalidated,
 			};
 			const installed = join(
@@ -117,7 +117,7 @@ export default function runtimeBridge(api: API) {
 				".agents/plugins/herdr-fork-from-message/scripts/fork_from_message.py",
 			);
 			const helper =
-				process.env.HERDR_QUESTION_HELPER ??
+				process.env.HERDR_PANEL_FORK_HELPER ??
 				(existsSync(join(root, "fork_from_message.py"))
 					? join(root, "fork_from_message.py")
 					: installed);
@@ -142,7 +142,7 @@ export default function runtimeBridge(api: API) {
 		} catch (error) {
 			if (!warned) {
 				current?.ui.notify(
-					`Question fork registration unavailable: ${String(error)}`,
+					`Panel Fork registration unavailable: ${String(error)}`,
 					"warning",
 				);
 				warned = true;
@@ -171,7 +171,7 @@ export default function runtimeBridge(api: API) {
 		"session_before_branch",
 		"session_before_tree",
 	]) {
-		api.on(event, () => (question ? { cancel: true } : undefined));
+		api.on(event, () => (readOnly ? { cancel: true } : undefined));
 	}
 	for (const event of ["session_switch", "session_branch", "session_tree"])
 		api.on(event, async (value, ctx) => {
@@ -185,7 +185,7 @@ export default function runtimeBridge(api: API) {
 				while (busy) await new Promise((resolve) => setTimeout(resolve, 10));
 				await publish(true);
 				ctx.ui.notify(
-					"Question fork registration invalidated by session navigation. Restart GJC to register its current session safely.",
+					"Panel Fork registration invalidated by session navigation. Restart GJC to register its current session safely.",
 					"warning",
 				);
 				return;
@@ -198,7 +198,7 @@ export default function runtimeBridge(api: API) {
 	});
 	api.on("before_agent_start", async (event, ctx) => {
 		await update(event, ctx);
-		if (!question) return;
+		if (!readOnly) return;
 		const original = event.systemPrompt ?? [];
 		return {
 			systemPrompt: Array.isArray(original)
@@ -206,5 +206,5 @@ export default function runtimeBridge(api: API) {
 				: `${original}\n\n${policy}`,
 		};
 	});
-	api.on("tool_call", (event) => (question ? questionGuard(event) : undefined));
+	api.on("tool_call", (event) => (readOnly ? readOnlyGuard(event) : undefined));
 }
