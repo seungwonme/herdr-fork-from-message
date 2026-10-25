@@ -11,11 +11,11 @@ to questions or read-only access. Read-only mode is a separate, explicit option.
 
 | Action | Qualified ID | Behavior |
 | --- | --- | --- |
-| Panel Fork (오른쪽) | `seungwonme.panel-fork.fork` | Native fork in a new panel, default |
-| Panel Fork (아래) | `seungwonme.panel-fork.fork-down` | Native fork below |
-| Panel Fork (새 탭) | `seungwonme.panel-fork.fork-tab` | Native fork in a new tab |
-| Panel Fork (읽기 전용) | `seungwonme.panel-fork.read-only` | Optional restricted fork |
-| Panel Fork from Message (Claude/Codex) | `seungwonme.panel-fork.from-message` | Native historical picker |
+| Fork pane | `seungwonme.panel-fork.fork` | Native fork in a new panel, default |
+| Fork pane down | `seungwonme.panel-fork.fork-down` | Native fork below |
+| Fork into new tab | `seungwonme.panel-fork.fork-tab` | Native fork in a new tab |
+| Fork read-only | `seungwonme.panel-fork.read-only` | Optional restricted fork |
+| Fork from message | `seungwonme.panel-fork.from-message` | Native historical picker, Claude/Codex |
 
 Herdr 0.9.5's pane context menu does **not** list plugin actions. Switching the
 right-click passthrough setting does not invoke this plugin. Use a configured
@@ -32,7 +32,7 @@ checking for conflicts:
 key = "prefix+f"
 type = "plugin_action"
 command = "seungwonme.panel-fork.fork"
-description = "Panel Fork (오른쪽)"
+description = "Fork pane"
 ```
 
 Then run `herdr config check` and `herdr --session default server reload-config`.

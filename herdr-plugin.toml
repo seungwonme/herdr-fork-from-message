@@ -7,32 +7,32 @@ platforms = ["macos", "linux"]
 
 [[actions]]
 id = "fork"
-title = "Panel Fork (오른쪽)"
+title = "Fork pane"
 description = "Fork the current conversation into a new panel with native agent permissions"
 contexts = ["pane"]
 command = ["python3", "scripts/fork_from_message.py", "--destination", "pane"]
 
 [[actions]]
 id = "fork-down"
-title = "Panel Fork (아래)"
+title = "Fork pane down"
 contexts = ["pane"]
 command = ["python3", "scripts/fork_from_message.py", "--direction", "down"]
 
 [[actions]]
 id = "fork-tab"
-title = "Panel Fork (새 탭)"
+title = "Fork into new tab"
 contexts = ["pane"]
 command = ["python3", "scripts/fork_from_message.py", "--destination", "tab"]
 
 [[actions]]
 id = "read-only"
-title = "Panel Fork (읽기 전용)"
+title = "Fork read-only"
 description = "Optional restricted fork; not the default Panel Fork action"
 contexts = ["pane"]
 command = ["python3", "scripts/fork_from_message.py", "--mode", "read-only"]
 
 [[actions]]
 id = "from-message"
-title = "Panel Fork from Message (Claude/Codex)"
+title = "Fork from message"
 contexts = ["pane"]
 command = ["python3", "scripts/fork_from_message.py", "--mode", "message"]
