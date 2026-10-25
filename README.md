@@ -1,231 +1,152 @@
-# Fork from Message for Herdr
+# Question Fork for Herdr
 
-[![CI](https://github.com/dmangla3/herdr-fork-from-message/actions/workflows/ci.yml/badge.svg)](https://github.com/dmangla3/herdr-fork-from-message/actions/workflows/ci.yml)
-
-Fork the Codex or Claude Code conversation in the focused [Herdr](https://herdr.dev)
-pane, choose an earlier user message with the agent's native picker, and continue in a
-new tab, split pane, or workspace.
-
-The source conversation stays open and unchanged. The plugin uses Herdr's trusted
-session metadata and each agent's native fork command; it never edits transcript files
-or silently substitutes a fresh conversation.
-
-## Features
-
-- Supports Codex and Claude Code.
-- Forks the exact session reported by Herdr's agent integration.
-- Preserves the focused pane's working directory.
-- Opens the agent's native earlier-message picker in the new destination.
-- Cleans up only the incomplete destination when launch or picker detection fails.
-- Runs locally with no telemetry, analytics, uploads, or developer callbacks.
-
-## Requirements
-
-| Dependency | Supported version |
-| --- | --- |
-| Herdr | 0.8.0 or newer |
-| Python | 3.10 or newer |
-| Codex CLI | 0.146.1 or a compatible version |
-| Claude Code | 2.1.220 or a compatible version |
-
-You need only the agent you use. Claude's fork and Rewind picker can open while logged
-out, but continuing the conversation requires a Claude login, subscription, API key, or
-supported third-party provider.
-
-## Install
-
-Install directly from GitHub:
-
-```sh
-herdr plugin install dmangla3/herdr-fork-from-message
-```
-
-Check that Herdr recognizes the plugin and your agent integration:
-
-```sh
-herdr plugin list --plugin dmangla3.fork-from-message
-herdr integration status
-```
-
-If the Codex or Claude integration is missing or outdated, install it and restart that
-agent:
-
-```sh
-herdr integration install codex
-herdr integration install claude
-```
+Personal fork of [dmangla3/herdr-fork-from-message](https://github.com/dmangla3/herdr-fork-from-message), MIT.
+One Herdr action opens an independent question-only copy of the current Claude Code,
+Codex, OMP, or GJC conversation. The parent receives no keystrokes or automatic replies.
+The default is the current point in the conversation, not an earlier-message picker.
 
 ## Actions
 
-| Action | Qualified action ID | Destination |
+| Action | Qualified ID | Behavior |
 | --- | --- | --- |
-| **Fork agent from message** | `dmangla3.fork-from-message.fork` | New tab |
-| **Fork agent beside current pane** | `dmangla3.fork-from-message.fork-pane` | Split pane |
-| **Fork agent into new workspace** | `dmangla3.fork-from-message.fork-workspace` | New workspace |
+| 질문용 분기 (오른쪽) | `seungwonme.question-fork.question` | Read-only question split |
+| 질문용 분기 (아래) | `seungwonme.question-fork.question-down` | Read-only question split below |
+| 질문용 분기 (새 탭) | `seungwonme.question-fork.question-tab` | Read-only question tab |
+| 일반 분기 (원래 권한 유지) | `seungwonme.question-fork.fork` | Native fork, not read-only |
+| 과거 메시지에서 분기 (Claude/Codex) | `seungwonme.question-fork.from-message` | Native historical picker |
 
-Invoke an action from Herdr's action UI, or from the CLI:
-
-```sh
-herdr plugin action invoke fork --plugin dmangla3.fork-from-message
-herdr plugin action invoke fork-pane --plugin dmangla3.fork-from-message
-herdr plugin action invoke fork-workspace --plugin dmangla3.fork-from-message
-```
-
-## Optional keybindings
-
-The plugin does not overwrite or reserve keybindings. Check
-`~/.config/herdr/config.toml` for conflicts, then add the bindings you want:
-
-```toml
-[[keys.command]]
-key = "prefix+f"
-type = "plugin_action"
-command = "dmangla3.fork-from-message.fork"
-description = "Fork agent from message"
-
-[[keys.command]]
-key = "prefix+shift+f"
-type = "plugin_action"
-command = "dmangla3.fork-from-message.fork-pane"
-description = "Fork agent beside current pane"
-```
-
-These are Prefix, `F` and Prefix, `Shift+F`. If your prefix is `Cmd+B`, as in the
-setup used to develop this plugin, that becomes `Cmd+B`, `F` and `Cmd+B`, `Shift+F`.
-The workspace action intentionally has no suggested default binding.
-
-Validate and reload the configuration:
+Use the focused pane's context menu. No keybindings are installed or overwritten.
 
 ```sh
-herdr config check
-herdr server reload-config
+herdr plugin action invoke question --plugin seungwonme.question-fork
 ```
 
-## Use
+For automation, select the server and pane explicitly instead of relying on focus:
 
-1. Focus a Herdr pane running the Codex or Claude conversation you want to branch.
-2. Invoke one of the three fork actions.
-3. Wait for the new destination to open with the native picker.
-4. Choose the earlier user message and confirm.
+```sh
+python3 scripts/fork_from_message.py --session default --pane <pane-id> --no-focus
+```
 
-### Codex picker
+## Installation
 
-The plugin opens Codex's transcript with `Ctrl+T`, then presses `Esc` to enter message
-selection. In Codex CLI 0.146.1:
+Requires Herdr 0.9.5+, Python 3.10+, and the CLI being forked. Tests additionally need
+Bun and Biome. The runtime bridge uses only Node/Bun standard APIs, with no SDK package
+installation, service, daemon, provider key copying, or network callbacks.
 
-- `Esc` or Left selects an older user message.
-- Right selects a newer user message.
-- Enter confirms the selected message.
+```sh
+git clone https://github.com/seungwonme/herdr-fork-from-message.git ~/.agents/plugins/herdr-fork-from-message
+herdr --session default plugin link ~/.agents/plugins/herdr-fork-from-message
+```
 
-Up and Down scroll the transcript; they do not change the selected message.
+Claude and Codex need their Herdr integration enabled in the **parent**. Do not turn
+off parent hooks before its session identity has been reported. The Claude question
+child disables hooks and receives a new explicit `--session-id`.
 
-### Claude picker
+### GJC and OMP runtime registration
 
-The plugin opens Claude Rewind with `Esc`, `Esc`. Use Up and Down to choose a prompt,
-then Enter. Choose **Restore conversation** to rewind only the forked conversation while
-leaving files unchanged.
+Herdr 0.9.5 does not expose a trusted GJC session reference. The plugin-owned bridge
+registers the exact live owner's session ID, transcript path, model, thinking, cwd,
+PID/process start, server socket, and terminal ID. Records are owner-only, expire after
+20 seconds, and refresh every five seconds inside the agent. There is no log globbing,
+mtime selection, process-environment scraping, or transcript rewriting.
 
-Claude also offers code-restoration choices. Those choices can modify files in the
-shared working directory, so the plugin deliberately leaves that decision to you.
-
-## How it works
+Read the bridge and obtain approval before global registration. Append this path to
+existing `extensions` arrays with each CLI's official `config get/set` commands; never
+replace other extension entries:
 
 ```text
-focused pane
-  -> Herdr trusted agent + session ID
-  -> new tab, split pane, or workspace in the same cwd
-  -> codex fork <session-id>
-     or claude --resume <session-id> --fork-session
-  -> native earlier-message picker
+~/.agents/plugins/herdr-fork-from-message/scripts/runtime_bridge.ts
 ```
 
-The split action chooses a right split for a wide pane and a downward split for a
-narrow or tall pane. This avoids creating unusably narrow columns.
+Start a **new** GJC/OMP process after registration. Existing processes are not remotely
+restarted. GJC 0.19.0 can retain a startup manager facade after in-process navigation:
+after `/new`, `/resume`, `/fork` or `/tree`, the bridge invalidates its registration.
+Restart that process with the desired session before forking again. It refuses stale
+identity rather than silently cloning the predecessor.
 
-## Safety and privacy
+State lives at `~/.config/herdr/plugins/state/seungwonme.question-fork/owners/`, or the
+Herdr plugin state directory. `HERDR_QUESTION_STATE_DIR` explicitly relocates it.
 
-- The source pane is never resumed, sent keys, rewritten, or closed.
-- Session IDs are passed as process arguments, not interpolated into shell commands.
-- The plugin does not read, rewrite, truncate, or delete agent JSONL/session files.
-- The plugin does not make network requests or send conversation data anywhere.
-- A forked Codex or Claude process may contact its normal provider after you submit a
-  new prompt; that is the agent's normal behavior, not plugin telemetry.
-- Detailed errors stay in Herdr's local plugin log.
+## Question boundaries
 
-## Troubleshooting
+- Claude: built-in `Read/Grep/Glob`, plan permissions, no MCP, no hooks, appended policy.
+- Codex: native read-only sandbox, no approval escalation, apps/hooks/multi-agent/shell
+  feature disabled, configured MCP servers disabled using transport-valid overrides.
+  Codex MCP names outside alphanumeric, underscore and hyphen fail closed.
+- GJC: `read/search/find/ast_grep`, no MCP/LSP/PTY; owner bridge denies every other tool.
+  Native `/goal pause` plus the runtime goal pause control stop inherited goals.
+- OMP: `read/grep/glob`, explicit guard extension only, per-child goal-disabled overlay;
+  all other tool calls are denied, including dynamically introduced tool names.
 
-Inspect the latest local action errors:
+Question policy is injected only into the child. It tells the child to wait for new
+questions, not resume inherited implementation, and not contact the parent. The checkout
+is **shared**, not a Git worktree or OS filesystem sandbox. These controls restrict model
+tools, not arbitrary user terminal commands, runtime code, manually changed permissions,
+or trusted extensions. Do not describe them as complete process isolation.
 
-```sh
-herdr plugin log list --plugin dmangla3.fork-from-message --limit 5
+### Start and failure semantics
+
+The plugin rechecks the source before creating a destination and uses native fork APIs:
+
+```text
+claude --resume ID --fork-session --session-id NEW_ID
+codex fork ID
+omp --fork PATH
+gjc --fork PATH
 ```
 
-Common failures are explicit:
+It relays allowlisted launch settings and live bridge model/profile/thinking, not secret
+arguments, inherited prompts, arbitrary environment, or permission-bypass flags.
+Shell launches use an owner-only temporary POSIX script and shell-neutral path.
 
-- **Unsupported pane:** focus a pane running Codex or Claude.
-- **Missing session ID:** update the matching Herdr integration and restart the agent.
-- **Hook trust review:** review the hooks in Codex, then invoke the action again.
-- **Picker timeout:** the installed agent version may have changed its native controls.
-- **Launch failure:** confirm `codex` or `claude` is available in Herdr's environment.
+A blocked/login/trust/error destination is **preserved**, never automatically closed or
+answered. Parent resources are never closed. Failed launches are not replaced by fresh
+conversations. Codex can delay reporting its child ID until its first post-fork prompt;
+that state is reported as `started_identity_pending`, not verified identity.
+Claude uses a new explicit UUID because disabling hooks also disables Herdr ID reporting.
 
-When failure happens after destination creation, the plugin closes only that incomplete
-pane, tab, or workspace. It never falls back to a fresh session while claiming success.
-An agent may retain its own native fork record after a late failure; the plugin does not
-delete agent-owned session data.
+The optional earlier-message picker uses native keyboard controls (Codex Ctrl+T then
+Esc; Claude Esc twice). The final selection is manual and shares the checkout. Claude
+code-restoration choices can modify files; use conversation-only restoration.
 
-## Known limitations
-
-- Codex CLI 0.146.1 has no supported API for selecting an exact earlier message. The
-  final selection therefore remains in Codex's native transcript UI.
-- Codex may not report the new fork's session ID until its first post-fork prompt. The
-  plugin verifies a new ID when Herdr reports one and otherwise relies on the successful
-  native `codex fork <exact-session-id>` launch plus picker detection.
-- Picker detection follows the native controls in the versions listed above. A future
-  UI change fails visibly and removes the incomplete destination instead of pretending
-  the fork succeeded.
-- A non-default `CLAUDE_CONFIG_DIR` is preserved when it is available to the plugin
-  process. Herdr does not currently expose variables set only inside the source shell.
-
-## Local development
+## Verification
 
 ```sh
-git clone https://github.com/dmangla3/herdr-fork-from-message.git
-cd herdr-fork-from-message
 ./scripts/check.sh
-herdr plugin link "$PWD"
 ```
 
-The project uses only Python's standard library. The test harness covers both agents,
-all destinations, exact native launch arguments, picker ordering, hostile or missing
-session IDs, startup races, timeouts, and destination-specific cleanup.
+Unit tests cover native argv/policy, allowlisted environment, source-session races,
+wrong or missing IDs, startup failures, destination preservation, all placements, stale
+owner records, symlinks, unknown tool denial, and goal gate requirements.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and
-[SECURITY.md](SECURITY.md) for reporting security issues.
+Live QA on macOS/Herdr 0.9.5:
 
-## Uninstall
+- GJC 0.19.0: distinct child ID, inherited token recall, write request refused and probe
+  file absent; parent not sent input.
+- OMP 18.12.6: distinct child ID, guard-ready registration, inherited transcript. The
+  configured Bedrock model returns HTTP 403, so provider answering is not verified.
+- Claude Code 2.1.310: explicit child UUID, inherited token recall with hooks disabled.
+- Codex 0.164.0: native fork lineage, inherited token recall, distinct child ID after prompt.
 
-First remove any matching `[[keys.command]]` blocks from
-`~/.config/herdr/config.toml`, then validate and reload the configuration:
+No tests send private parent content to a different provider. Fixtures are disposable
+conversations created specifically for QA.
+
+## Remove
+
+Remove the bridge path from the two CLI `extensions` arrays, preserving other entries,
+and start new processes. Then unlink the plugin:
 
 ```sh
-herdr config check
-herdr server reload-config
+herdr --session default plugin unlink seungwonme.question-fork
 ```
 
-For a GitHub installation:
+The upstream `forkr` plugin can remain installed as a separate alternative. No session
+transcripts, credentials, global rules, skills, existing hooks or keybindings are deleted.
 
-```sh
-herdr plugin uninstall dmangla3.fork-from-message
-```
+## References
 
-For a locally linked checkout:
+- [Base implementation and tests](https://github.com/dmangla3/herdr-fork-from-message).
+- [forkr](https://github.com/t4t5/herdr-forkr): small, direct current-point Herdr actions.
+- [OMP native fork placement](https://github.com/can1357/oh-my-pi/blob/v18.12.6/docs/session-operations-export-share-fork-resume.md#fork): parent preservation, launch settings, safe shell execution.
 
-```sh
-herdr plugin unlink dmangla3.fork-from-message
-```
-
-Uninstalling the plugin does not remove Codex or Claude session data.
-
-## License
-
-[MIT](LICENSE)
+[MIT license](LICENSE). Upstream attribution is retained.

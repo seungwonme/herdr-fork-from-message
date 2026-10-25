@@ -4,11 +4,11 @@ Issues and focused pull requests are welcome.
 
 ## Development setup
 
-Requirements are Python 3.10 or newer and, for live verification, Herdr 0.8.0
-or newer with Codex and/or Claude Code installed.
+Requirements are Python 3.10 or newer, Bun and Biome. Live verification requires
+Herdr 0.9.5 or newer and the selected agent CLI.
 
 ```sh
-git clone https://github.com/dmangla3/herdr-fork-from-message.git
+git clone https://github.com/seungwonme/herdr-fork-from-message.git
 cd herdr-fork-from-message
 ./scripts/check.sh
 ```
@@ -19,7 +19,7 @@ The project intentionally has no third-party runtime or test dependencies.
 
 1. Add or update a focused unit test for behavior changes.
 2. Keep native agent forking intact; do not edit agent transcript/session files.
-3. Preserve clear failures and cleanup only resources created by the action.
+3. Preserve clear failures and leave partially started destinations available.
 4. Run `./scripts/check.sh`.
 5. Review the diff for unrelated changes before opening a pull request.
 

@@ -7,7 +7,7 @@ conversation data, session identities, terminal contents, or arbitrary command
 execution.
 
 Report it privately through the repository's
-[GitHub security advisory form](https://github.com/dmangla3/herdr-fork-from-message/security/advisories/new).
+[GitHub security advisory form](https://github.com/seungwonme/herdr-fork-from-message/security/advisories/new).
 Include the affected version, agent and Herdr versions, reproduction steps, and
 the expected impact. Do not include real conversation contents or credentials.
 
@@ -16,8 +16,14 @@ For non-sensitive bugs, use the public issue tracker.
 ## Security model
 
 This plugin controls local Herdr terminals under the current user's permissions.
-It accepts session identity only from Herdr's matching Codex or Claude integration,
-passes native arguments without a shell, and does not edit transcript files or send
-telemetry. A forked agent retains its normal access to the focused pane's working
-directory and may contact its configured model provider after the user submits a
-prompt.
+Claude/Codex source identity comes from their matching Herdr integrations. GJC/OMP
+identity comes from owner-written private records bound to the server socket,
+terminal, foreground PID/process-start and cwd. Records expire and are rechecked.
+The bridge never exports credentials, scans process environments, or rewrites JSONL.
+
+Native process arguments use Herdr's launcher; GJC uses a private temporary POSIX
+script. Failed destinations are preserved so approval/login state is not destroyed.
+Question mode restricts model tools, not arbitrary process filesystem access. The
+checkout is shared. Trusted runtime extensions and manually changed permissions
+remain outside this boundary. Provider calls use the agent's normal configuration
+after the user asks a question; the plugin has no telemetry or remote callbacks.

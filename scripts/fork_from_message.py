@@ -1,644 +1,358 @@
 #!/usr/bin/env python3
-"""Fork the focused Herdr Codex or Claude pane, then open its message picker."""
-
+"""Question-only native forks, based on dmangla3/herdr-fork-from-message (MIT)."""
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict, dataclass
 import json
 import os
+from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
 import time
-import uuid
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Mapping, Sequence
+import uuid
 
+from agent_contracts import AGENTS, ENVIRONMENT_KEYS, ContractError, fork_launch, safe_launch_flags
+from runtime_registry import PLUGIN_ID, RegistryError, descendant_of, process_start, read_record, state_root, write_record
 
-PLUGIN_ID = "dmangla3.fork-from-message"
-ACTION_TITLE = "Fork agent from message"
-SUPPORTED_AGENTS = {"codex": "Codex", "claude": "Claude"}
-DESTINATIONS = ("tab", "pane", "workspace")
-COMMAND_TIMEOUT_SECONDS = 15
-START_TIMEOUT_MILLISECONDS = 45_000
-START_PROCESS_TIMEOUT_SECONDS = 55
-SHELL_READY_TIMEOUT_SECONDS = 8
-TRANSCRIPT_TIMEOUT_SECONDS = 8
-PICKER_TIMEOUT_SECONDS = 8
-POLL_INTERVAL_SECONDS = 0.2
-TRANSCRIPT_MARKERS = ("edit prev",)
-PICKER_MARKERS = ("edit next", "edit message")
-CLAUDE_PICKER_MARKERS = ("restore the code and/or conversation",)
-HOOK_REVIEW_MARKER = "hooks need review"
+ROOT = Path(__file__).resolve().parents[1]
+DESTINATIONS = ("pane", "tab", "workspace")
+START_SECONDS = 45
+POLL_SECONDS = 0.2
 
 
 class ForkError(RuntimeError):
-    """An actionable workflow failure."""
+    pass
+
+
+class HerdrClient:
+    def __init__(self, executable: str, session: str | None = None):
+        self.prefix = [executable, *(["--session", session] if session else [])]
+
+    def json(self, args: Sequence[str], timeout: float = 15) -> dict[str, Any]:
+        try:
+            p = subprocess.run([*self.prefix, *args], capture_output=True, text=True, check=True, timeout=timeout)
+            if not p.stdout.strip() and list(args[:2]) == ["pane", "run"]:
+                return {}
+            value = json.loads(p.stdout)
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            detail = (getattr(exc, "stderr", "") or str(exc)).strip()
+            raise ForkError(f"Herdr {' '.join(args[:2])} failed: {detail}") from exc
+        if not isinstance(value, dict):
+            raise ForkError("Herdr returned non-object JSON")
+        result = value.get("result")
+        if not isinstance(result, dict):
+            raise ForkError(f"Herdr rejected {' '.join(args[:2])}: {value.get('error', 'no result')}")
+        return result
+
+
+def object_value(value: Any, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ForkError(f"Missing {name}")
+    return value
+
+
+def native_id(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ForkError("Missing native session ID")
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError as exc:
+        raise ForkError("Invalid native session ID") from exc
+    if str(parsed) != value.lower():
+        raise ForkError("Noncanonical native session ID")
+    return value
+
+
+def foreground(client: HerdrClient, pane_id: str, agent: str | None = None) -> dict[str, Any]:
+    info = object_value(client.json(["pane", "process-info", "--pane", pane_id]).get("process_info"), "process info")
+    processes = info.get("foreground_processes", [])
+    if not isinstance(processes, list):
+        raise ForkError("Pane has no foreground process list")
+    candidates = processes
+    if agent:
+        candidates = [item for item in processes if isinstance(item, dict) and
+                      (item.get("name") == agent or (isinstance(item.get("argv"), list) and item["argv"] and Path(item["argv"][0]).name == agent))]
+    if len(candidates) != 1:
+        raise ForkError("Pane must have exactly one matching foreground agent process")
+    process = object_value(candidates[0], "foreground process")
+    argv = process.get("argv")
+    if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
+        raise ForkError("Foreground process has no verifiable argv")
+    if agent and Path(argv[0]).name != agent and process.get("name") != agent:
+        raise ForkError("Agent metadata does not match the foreground process")
+    return process
 
 
 @dataclass(frozen=True)
 class ForkResult:
+    status: str
     source_pane_id: str
     source_session_id: str
-    fork_pane_id: str
+    pane_id: str
     fork_session_id: str | None
     destination: str
     workspace_id: str
     tab_id: str
     cwd: str
-
-
-@dataclass(frozen=True)
-class ForkTarget:
-    destination: str
-    workspace_id: str
-    tab_id: str
-    pane_id: str
-
-
-class HerdrClient:
-    def __init__(self, executable: str) -> None:
-        self.executable = executable
-
-    def _run(self, args: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
-        try:
-            return subprocess.run(
-                [self.executable, *args],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except FileNotFoundError as exc:
-            raise ForkError(f"Herdr executable not found: {self.executable}") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise ForkError(f"Herdr command timed out: {' '.join(args[:3])}") from exc
-        except subprocess.CalledProcessError as exc:
-            detail = (exc.stderr or exc.stdout or "unknown Herdr error").strip()
-            raise ForkError(f"Herdr command failed ({' '.join(args[:3])}): {detail}") from exc
-
-    def json(self, args: Sequence[str], timeout: float = COMMAND_TIMEOUT_SECONDS) -> Mapping[str, Any]:
-        output = self._run(args, timeout).stdout
-        try:
-            value = json.loads(output)
-        except json.JSONDecodeError as exc:
-            raise ForkError(f"Herdr returned invalid JSON for {' '.join(args[:3])}") from exc
-        if not isinstance(value, dict):
-            raise ForkError(f"Herdr returned an unexpected response for {' '.join(args[:3])}")
-        return value
-
-    def text(self, args: Sequence[str], timeout: float = COMMAND_TIMEOUT_SECONDS) -> str:
-        return self._run(args, timeout).stdout
-
-
-def _object(value: Any, description: str) -> Mapping[str, Any]:
-    if not isinstance(value, dict):
-        raise ForkError(f"Herdr response is missing {description}")
-    return value
-
-
-def _nonempty_string(value: Any) -> str | None:
-    return value if isinstance(value, str) and value.strip() else None
-
-
-def _canonical_uuid(value: Any) -> str | None:
-    text = _nonempty_string(value)
-    if text is None:
-        return None
-    try:
-        parsed = uuid.UUID(text)
-    except ValueError:
-        return None
-    return str(parsed) if str(parsed) == text.lower() else None
-
-
-def load_invocation_context(env: Mapping[str, str]) -> Mapping[str, Any]:
-    raw = env.get("HERDR_PLUGIN_CONTEXT_JSON")
-    if not raw:
-        raise ForkError(
-            "Herdr did not provide focused-pane context. Invoke this through the installed plugin action."
-        )
-    try:
-        context = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ForkError("Herdr provided malformed focused-pane context.") from exc
-    return _object(context, "plugin invocation context")
-
-
-def _source_details(
-    context: Mapping[str, Any], pane: Mapping[str, Any]
-) -> tuple[str, str, str, str, str]:
-    pane_id = _nonempty_string(context.get("focused_pane_id"))
-    if pane_id is None:
-        raise ForkError(
-            "No focused pane was available. "
-            "Focus a Codex or Claude pane and try again."
-        )
-
-    actual_pane_id = _nonempty_string(pane.get("pane_id"))
-    if actual_pane_id != pane_id:
-        raise ForkError(
-            "The focused pane changed before it could be verified. "
-            "Focus the Codex or Claude pane and retry."
-        )
-
-    agent_kind = _nonempty_string(pane.get("agent"))
-    if agent_kind not in SUPPORTED_AGENTS:
-        detected = agent_kind or "no recognized agent"
-        raise ForkError(
-            f"The focused pane is {detected}; only Codex and Claude are supported. "
-            "Focus a Codex or Claude pane and retry."
-        )
-    agent_name = SUPPORTED_AGENTS[agent_kind]
-
-    session = pane.get("agent_session")
-    if not isinstance(session, dict):
-        raise ForkError(
-            f"The focused pane has no trusted {agent_name} session ID from Herdr's integration. "
-            f"Run `herdr integration install {agent_kind}`, restart {agent_name}, and retry."
-        )
-    if (
-        session.get("agent") != agent_kind
-        or session.get("kind") != "id"
-        or session.get("source") != f"herdr:{agent_kind}"
-    ):
-        raise ForkError(
-            f"The focused pane has no trusted {agent_name} session ID from Herdr's integration. "
-            f"Run `herdr integration install {agent_kind}`, restart {agent_name}, and retry."
-        )
-    session_id = _canonical_uuid(session.get("value"))
-    if session_id is None:
-        raise ForkError(
-            f"Herdr's {agent_name} integration reported a missing or invalid session ID. "
-            f"Restart {agent_name} and retry."
-        )
-
-    workspace_id = _nonempty_string(pane.get("workspace_id"))
-    if workspace_id is None or workspace_id != _nonempty_string(context.get("workspace_id")):
-        raise ForkError(
-            "The focused pane's workspace changed before it could be verified. "
-            "Retry the action."
-        )
-
-    cwd = (
-        _nonempty_string(context.get("focused_pane_cwd"))
-        or _nonempty_string(pane.get("foreground_cwd"))
-        or _nonempty_string(pane.get("cwd"))
-    )
-    if cwd is None or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
-        raise ForkError("The focused agent pane has no usable working directory.")
-
-    return pane_id, session_id, workspace_id, cwd, agent_kind
-
-
-def _fork_label(context: Mapping[str, Any]) -> str:
-    source = _nonempty_string(context.get("tab_label"))
-    if source:
-        clean = " ".join(source.split())
-        return f"Fork · {clean}"[:80]
-    return "Agent fork"
+    agent: str
+    restrictions: str
 
 
 class ForkWorkflow:
-    def __init__(
-        self,
-        client: HerdrClient,
-        context: Mapping[str, Any],
-        codex_home: str | None = None,
-        claude_config_dir: str | None = None,
-        destination: str = "tab",
-    ) -> None:
-        if destination not in DESTINATIONS:
-            raise ForkError(f"Unsupported fork destination: {destination}")
-        self.client = client
-        self.context = context
-        self.codex_home = codex_home
-        self.claude_config_dir = claude_config_dir
-        self.destination = destination
-        self.created_resource: tuple[str, str] | None = None
-        self.cleanup_error: str | None = None
+    def __init__(self, client: HerdrClient, context: Mapping[str, Any], env: Mapping[str, str],
+                 destination: str = "pane", mode: str = "question", direction: str = "right", focus: bool = True):
+        self.client, self.context, self.env = client, context, env
+        self.destination, self.mode, self.direction, self.focus = destination, mode, direction, focus
+        self.target: dict[str, str] | None = None
 
     def execute(self) -> ForkResult:
         try:
             return self._execute()
-        except Exception as exc:
-            self._cleanup()
-            message = (
-                str(exc)
-                if isinstance(exc, ForkError)
-                else f"Unexpected workflow error: {exc}"
-            )
-            if self.cleanup_error:
-                message = f"{message} {self.cleanup_error}"
-            raise ForkError(message) from exc
+        except (ForkError, ContractError, RegistryError) as exc:
+            # A live process or approval dialog may exist. Preserve it, never close on error.
+            suffix = f" Destination preserved: {self.target['pane_id']}." if self.target else ""
+            raise ForkError(str(exc) + suffix) from exc
 
     def _execute(self) -> ForkResult:
-        source_pane_id = _nonempty_string(self.context.get("focused_pane_id"))
-        if source_pane_id is None:
-            raise ForkError(
-                "No focused pane was available. Focus a Codex or Claude pane and try again."
-            )
-
-        pane_response = self.client.json(["pane", "get", source_pane_id])
-        pane = _object(_object(pane_response.get("result"), "pane result").get("pane"), "pane data")
-        source_pane_id, source_session_id, workspace_id, cwd, agent_kind = _source_details(
-            self.context, pane
-        )
-
-        target = self._create_target(
-            source_pane_id,
-            workspace_id,
-            cwd,
-            agent_kind,
-        )
-        fork_pane_id = target.pane_id
-
-        agent_name = f"{agent_kind}_fork_{uuid.uuid4().hex[:12]}"
-        self._start_fork_agent(agent_name, fork_pane_id, source_session_id, agent_kind)
-        self._fail_if_startup_blocked(fork_pane_id)
-        self._open_message_picker(fork_pane_id, agent_kind)
-        fork_session_id = self._reported_fork_session(
-            fork_pane_id, source_session_id, agent_kind
-        )
-        self._focus_target(target)
-
-        result = ForkResult(
-            source_pane_id=source_pane_id,
-            source_session_id=source_session_id,
-            fork_pane_id=fork_pane_id,
-            fork_session_id=fork_session_id,
-            destination=target.destination,
-            workspace_id=target.workspace_id,
-            tab_id=target.tab_id,
-            cwd=cwd,
-        )
-        self.created_resource = None
-        return result
-
-    def _environment_args(self, agent_kind: str) -> list[str]:
-        if agent_kind == "codex" and self.codex_home:
-            return ["--env", f"CODEX_HOME={self.codex_home}"]
-        if agent_kind == "claude" and self.claude_config_dir:
-            return ["--env", f"CLAUDE_CONFIG_DIR={self.claude_config_dir}"]
-        return []
-
-    def _create_target(
-        self,
-        source_pane_id: str,
-        source_workspace_id: str,
-        cwd: str,
-        agent_kind: str,
-    ) -> ForkTarget:
-        if self.destination == "pane":
-            return self._create_pane_target(source_pane_id, source_workspace_id, cwd, agent_kind)
-        if self.destination == "workspace":
-            return self._create_workspace_target(cwd, agent_kind)
-        return self._create_tab_target(source_workspace_id, cwd, agent_kind)
-
-    def _create_tab_target(
-        self,
-        workspace_id: str,
-        cwd: str,
-        agent_kind: str,
-    ) -> ForkTarget:
-        args = [
-            "tab",
-            "create",
-            "--workspace",
-            workspace_id,
-            "--cwd",
-            cwd,
-            "--label",
-            _fork_label(self.context),
-            *self._environment_args(agent_kind),
-            "--no-focus",
-        ]
-        response = self.client.json(args)
-        result = _object(response.get("result"), "tab creation result")
-        tab = _object(result.get("tab"), "created tab")
-        root_pane = _object(result.get("root_pane"), "created root pane")
-        tab_id = _nonempty_string(tab.get("tab_id"))
-        if tab_id is not None:
-            self.created_resource = ("tab", tab_id)
-        pane_id = _nonempty_string(root_pane.get("pane_id"))
-        if tab_id is None or pane_id is None:
-            raise ForkError("Herdr created a tab but did not return its tab and pane IDs.")
-        return ForkTarget("tab", workspace_id, tab_id, pane_id)
-
-    def _split_direction(self, source_pane_id: str) -> str:
-        response = self.client.json(["pane", "layout", "--pane", source_pane_id])
-        layout = _object(_object(response.get("result"), "layout result").get("layout"), "layout")
-        panes = layout.get("panes")
-        if not isinstance(panes, list):
-            raise ForkError("Herdr did not return source pane geometry.")
-        for pane in panes:
-            if not isinstance(pane, dict) or pane.get("pane_id") != source_pane_id:
-                continue
-            rect = pane.get("rect")
-            if not isinstance(rect, dict):
-                break
-            width = rect.get("width")
-            height = rect.get("height")
-            if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
-                return "right" if width >= height * 2 else "down"
-            break
-        raise ForkError("Herdr did not return usable source pane geometry.")
-
-    def _create_pane_target(
-        self,
-        source_pane_id: str,
-        workspace_id: str,
-        cwd: str,
-        agent_kind: str,
-    ) -> ForkTarget:
-        direction = self._split_direction(source_pane_id)
-        args = [
-            "pane",
-            "split",
-            source_pane_id,
-            "--direction",
-            direction,
-            "--cwd",
-            cwd,
-            *self._environment_args(agent_kind),
-            "--no-focus",
-        ]
-        response = self.client.json(args)
-        pane = _object(_object(response.get("result"), "pane split result").get("pane"), "pane")
-        pane_id = _nonempty_string(pane.get("pane_id"))
-        if pane_id is not None:
-            self.created_resource = ("pane", pane_id)
-        tab_id = _nonempty_string(pane.get("tab_id")) or _nonempty_string(
-            self.context.get("tab_id")
-        )
-        actual_workspace_id = _nonempty_string(pane.get("workspace_id")) or workspace_id
-        if pane_id is None or tab_id is None:
-            raise ForkError("Herdr split a pane but did not return its pane and tab IDs.")
-        return ForkTarget(
-            "pane",
-            actual_workspace_id,
-            tab_id,
-            pane_id,
-        )
-
-    def _create_workspace_target(self, cwd: str, agent_kind: str) -> ForkTarget:
-        args = [
-            "workspace",
-            "create",
-            "--cwd",
-            cwd,
-            "--label",
-            _fork_label(self.context),
-            *self._environment_args(agent_kind),
-            "--no-focus",
-        ]
-        response = self.client.json(args)
-        result = _object(response.get("result"), "workspace creation result")
-        workspace = _object(result.get("workspace"), "created workspace")
-        workspace_id = _nonempty_string(workspace.get("workspace_id"))
-        if workspace_id is not None:
-            self.created_resource = ("workspace", workspace_id)
-        tab = _object(result.get("tab"), "created workspace tab")
-        root_pane = _object(result.get("root_pane"), "created workspace pane")
-        tab_id = _nonempty_string(tab.get("tab_id"))
-        pane_id = _nonempty_string(root_pane.get("pane_id"))
-        if workspace_id is None or tab_id is None or pane_id is None:
-            raise ForkError(
-                "Herdr created a workspace but did not return its workspace, tab, and pane IDs."
-            )
-        return ForkTarget(
-            "workspace",
-            workspace_id,
-            tab_id,
-            pane_id,
-        )
-
-    def _focus_target(self, target: ForkTarget) -> None:
-        if target.destination == "pane":
-            self.client.json(["agent", "focus", target.pane_id])
-        elif target.destination == "workspace":
-            self.client.json(["workspace", "focus", target.workspace_id])
+        source_id = self.context.get("focused_pane_id")
+        if not isinstance(source_id, str) or not source_id:
+            raise ForkError("No explicit source pane")
+        pane = object_value(self.client.json(["pane", "get", source_id]).get("pane"), "source pane")
+        if pane.get("pane_id") != source_id or pane.get("workspace_id") != self.context.get("workspace_id"):
+            raise ForkError("Source pane/workspace identity changed")
+        agent = pane.get("agent")
+        if agent not in AGENTS:
+            raise ForkError("Supported agents: " + ", ".join(AGENTS))
+        process = foreground(self.client, source_id, agent)
+        cwd = pane.get("foreground_cwd") or pane.get("cwd")
+        if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
+            raise ForkError("Source working directory is unavailable")
+        owner = None
+        if agent in ("gjc", "omp"):
+            owner = read_record(state_root(self.env), self.env.get("HERDR_SOCKET_PATH", ""), pane, process["pid"])
+            reference = native_id(owner["session_id"])
+            if owner.get("session_file"):
+                reference = owner["session_file"]
+            if self.mode == "question" and owner.get("bridge_version") != 1:
+                raise ForkError("Question mode requires the runtime guard bridge")
         else:
-            self.client.json(["tab", "focus", target.tab_id])
+            reference = self._native_reference(pane, agent)
+        if self.mode == "message" and agent not in ("claude", "codex"):
+            raise ForkError("Earlier-message picker supports Claude and Codex only")
+        mcp = self._codex_mcp(process["argv"]) if agent == "codex" and self.mode == "question" else []
+        environment = {**self.env, **(owner.get("environment", {}) if owner else {})}
+        if owner:
+            for key in ENVIRONMENT_KEYS[agent]:
+                environment.pop(key, None)
+            environment.update(owner.get("environment", {}))
+        environment["HERDR_QUESTION_STATE_DIR"] = str(state_root(self.env))
+        launch = fork_launch(agent, reference, process["argv"], environment, question=self.mode == "question",
+                             bridge=ROOT / "scripts/runtime_bridge.ts", omp_overlay=ROOT / "scripts/question-omp.yml",
+                             mcp_servers=mcp, runtime=owner)
+        expected_child_id = str(uuid.uuid4()) if agent == "claude" else None
+        launch_argv = (*launch.argv, "--session-id", expected_child_id) if expected_child_id else launch.argv
+        if owner:
+            # The new interactive shell has its own startup environment. Remove
+            # absent owner roots explicitly before exec, not with empty variables.
+            unset = [part for key in ENVIRONMENT_KEYS[agent] if key not in owner.get("environment", {}) for part in ("-u", key)]
+            assignments = [f"{key}={value}" for key, value in launch.environment.items()]
+            launch_argv = ("env", *unset, *assignments, *launch_argv)
+        source_fingerprint = (pane.get("terminal_id"), process["pid"], reference)
+        latest = object_value(self.client.json(["pane", "get", source_id]).get("pane"), "source recheck")
+        current_process = foreground(self.client, source_id, agent)
+        if (latest.get("terminal_id"), current_process["pid"]) != source_fingerprint[:2]:
+            raise ForkError("Source process changed during launch preparation")
+        if agent in ("gjc", "omp"):
+            fresh = read_record(state_root(self.env), self.env.get("HERDR_SOCKET_PATH", ""), latest, process["pid"])
+            if fresh["session_id"] != owner["session_id"]:
+                raise ForkError("Source session switched before fork")
+        elif self._native_reference(latest, agent) != reference:
+            raise ForkError("Source session switched before fork")
+        target = self._create_target(pane, cwd, launch.environment)
+        self.target = target
+        self._wait_shell(target["pane_id"])
+        if agent in ("gjc", "omp"):
+            self._start_shell(target["pane_id"], launch_argv)
+        else:
+            self._start_native(target["pane_id"], agent, launch_argv[1:])
+        fork_id = self._verify_child(target["pane_id"], agent, owner["session_id"] if owner else reference, expected_child_id)
+        if self.mode == "message":
+            self._picker(target["pane_id"], agent)
+        self.client.json(["pane", "rename", target["pane_id"], f"Question · {AGENTS[agent]}" if self.mode == "question" else f"Fork · {AGENTS[agent]}"])
+        if self.focus:
+            self.client.json(["agent", "focus", target["pane_id"]])
+        return ForkResult("ready" if fork_id else "started_identity_pending", source_id,
+                          owner["session_id"] if owner else reference, target["pane_id"], fork_id,
+                          self.destination, target["workspace_id"], target["tab_id"], cwd, agent, launch.restrictions)
 
-    def _start_fork_agent(
-        self,
-        agent_name: str,
-        pane_id: str,
-        source_session_id: str,
-        agent_kind: str,
-    ) -> None:
-        native_args = (
-            ["fork", source_session_id]
-            if agent_kind == "codex"
-            else ["--resume", source_session_id, "--fork-session"]
-        )
-        args = [
-            "agent",
-            "start",
-            agent_name,
-            "--kind",
-            agent_kind,
-            "--pane",
-            pane_id,
-            "--timeout",
-            str(START_TIMEOUT_MILLISECONDS),
-            "--",
-            *native_args,
-        ]
-        deadline = time.monotonic() + SHELL_READY_TIMEOUT_SECONDS
-        while True:
-            try:
-                self.client.json(args, timeout=START_PROCESS_TIMEOUT_SECONDS)
-                return
-            except ForkError as exc:
-                if "agent_pane_busy" not in str(exc) or time.monotonic() >= deadline:
-                    raise
-                time.sleep(POLL_INTERVAL_SECONDS)
+    def _native_reference(self, pane: Mapping[str, Any], agent: str) -> str:
+        session = pane.get("agent_session")
+        if not isinstance(session, dict) or session.get("agent") != agent or session.get("kind") != "id" or session.get("source") != f"herdr:{agent}":
+            raise ForkError(f"No trusted {agent} session reference. Install its Herdr integration and restart it.")
+        return native_id(session.get("value"))
 
-    def _fail_if_startup_blocked(self, pane_id: str) -> None:
-        screen = self.client.text(
-            ["agent", "read", pane_id, "--source", "detection", "--lines", "40"]
-        )
-        if HOOK_REVIEW_MARKER in screen.lower():
-            raise ForkError(
-                "Codex is waiting for hook trust review. Review the pending hooks in Codex, "
-                "then retry."
-            )
-
-    def _reported_fork_session(
-        self,
-        pane_id: str,
-        source_session_id: str,
-        agent_kind: str,
-    ) -> str | None:
-        response = self.client.json(["agent", "get", pane_id])
-        agent = _object(_object(response.get("result"), "agent result").get("agent"), "agent data")
-        session = agent.get("agent_session")
-        if not isinstance(session, dict):
-            return None
-        fork_session_id = _canonical_uuid(session.get("value"))
-        if (
-            session.get("agent") != agent_kind
-            or session.get("kind") != "id"
-            or session.get("source") != f"herdr:{agent_kind}"
-            or fork_session_id is None
-        ):
-            raise ForkError("Herdr reported invalid session metadata for the new agent fork.")
-        if fork_session_id == source_session_id:
-            raise ForkError(
-                "Herdr reported the source session ID for the new pane instead of a fork ID."
-            )
-        return fork_session_id
-
-    def _wait_for_markers(
-        self,
-        pane_id: str,
-        markers: tuple[str, ...],
-        timeout_seconds: float,
-    ) -> bool:
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            screen = self.client.text(
-                ["agent", "read", pane_id, "--source", "detection", "--lines", "120"]
-            )
-            lowered = screen.lower()
-            if any(marker in lowered for marker in markers):
-                return True
-            time.sleep(POLL_INTERVAL_SECONDS)
-        return False
-
-    def _wait_for_transcript(self, pane_id: str) -> None:
-        if self._wait_for_markers(pane_id, TRANSCRIPT_MARKERS, TRANSCRIPT_TIMEOUT_SECONDS):
-            return
-        raise ForkError(
-            "The Codex fork started, but its native transcript did not appear after Ctrl+T. "
-            "Check whether Codex remapped the transcript shortcut."
-        )
-
-    def _wait_for_codex_picker(self, pane_id: str) -> None:
-        if self._wait_for_markers(pane_id, PICKER_MARKERS, PICKER_TIMEOUT_SECONDS):
-            return
-        raise ForkError(
-            "The Codex transcript opened, but message selection did not appear after Esc. "
-            "Check whether Codex changed its backtrack controls."
-        )
-
-    def _wait_for_claude_picker(self, pane_id: str) -> None:
-        if self._wait_for_markers(pane_id, CLAUDE_PICKER_MARKERS, PICKER_TIMEOUT_SECONDS):
-            return
-        raise ForkError(
-            "The Claude fork started, but its Claude Rewind picker did not appear after Esc Esc. "
-            "Confirm the source session has at least one prompt "
-            "and check whether Claude changed its rewind controls."
-        )
-
-    def _open_message_picker(self, pane_id: str, agent_kind: str) -> None:
-        if agent_kind == "codex":
-            self.client.json(["agent", "send-keys", pane_id, "ctrl+t"])
-            self._wait_for_transcript(pane_id)
-            self.client.json(["agent", "send-keys", pane_id, "esc"])
-            self._wait_for_codex_picker(pane_id)
-            return
-        self.client.json(["agent", "send-keys", pane_id, "esc", "esc"])
-        self._wait_for_claude_picker(pane_id)
-
-    def _cleanup(self) -> None:
-        resource = self.created_resource
-        if resource is None:
-            return
-        kind, resource_id = resource
+    def _codex_mcp(self, argv: list[str]) -> list[tuple[str, str]]:
         try:
-            self.client.json([kind, "close", resource_id])
-        except Exception as exc:  # Preserve the original failure while surfacing cleanup trouble.
-            self.cleanup_error = (
-                f"Could not remove incomplete {kind} {resource_id}: {exc}. "
-                f"Close that {kind} manually."
-            )
-        finally:
-            self.created_resource = None
+            launch_flags = safe_launch_flags("codex", argv)
+            profile = [part for index in range(0, len(launch_flags), 2) if launch_flags[index] in ("--profile", "-p") for part in launch_flags[index:index + 2]]
+            result = subprocess.run(["codex", *profile, "mcp", "list", "--json"], capture_output=True, text=True, check=True, timeout=15)
+            entries = json.loads(result.stdout)
+            if not isinstance(entries, list):
+                raise ValueError("expected MCP list")
+            return [(entry["name"], entry["transport"]["type"]) for entry in entries if isinstance(entry, dict) and isinstance(entry.get("name"), str)]
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            raise ForkError("Cannot enumerate configured Codex MCP servers; refusing question mode") from exc
+
+    def _create_target(self, source: Mapping[str, Any], cwd: str, environment: Mapping[str, str]) -> dict[str, str]:
+        env_args = [part for key, value in environment.items() for part in ("--env", f"{key}={value}")]
+        if self.destination == "pane":
+            result = self.client.json(["pane", "split", source["pane_id"], "--direction", self.direction,
+                                       "--cwd", cwd, *env_args, "--no-focus"])
+            pane = object_value(result.get("pane"), "created pane")
+            return {"pane_id": pane["pane_id"], "tab_id": pane["tab_id"], "workspace_id": pane["workspace_id"]}
+        args = [self.destination, "create", "--cwd", cwd, "--label", "Question fork", *env_args, "--no-focus"]
+        if self.destination == "tab":
+            args.extend(("--workspace", source["workspace_id"]))
+        result = self.client.json(args)
+        pane = object_value(result.get("root_pane"), "created root pane")
+        tab = object_value(result.get("tab"), "created tab")
+        workspace = object_value(result.get("workspace"), "created workspace") if self.destination == "workspace" else source
+        return {"pane_id": pane["pane_id"], "tab_id": tab["tab_id"], "workspace_id": workspace.get("workspace_id", source["workspace_id"])}
+
+    def _wait_shell(self, pane_id: str) -> None:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            info = self.client.json(["pane", "process-info", "--pane", pane_id]).get("process_info", {})
+            processes = info.get("foreground_processes", [])
+            if len(processes) == 1 and (processes[0].get("pid") == info.get("shell_pid")):
+                return
+            time.sleep(POLL_SECONDS)
+        raise ForkError("New pane has not reached its shell prompt")
+
+    def _start_native(self, pane: str, agent: str, arguments: Sequence[str]) -> None:
+        self.client.json(["agent", "start", f"question-{uuid.uuid4().hex[:10]}", "--kind", agent,
+                          "--pane", pane, "--timeout", str(START_SECONDS * 1000), "--", *arguments], timeout=START_SECONDS + 10)
+
+    def _start_shell(self, pane: str, argv: Sequence[str]) -> None:
+        # A private POSIX launcher avoids injecting shell syntax into an unknown interactive shell.
+        import tempfile
+        fd, filename = tempfile.mkstemp(prefix="herdr-question-", suffix=".sh")
+        path = Path(filename)
+        if any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-" for c in filename):
+            os.close(fd)
+            path.unlink()
+            raise ForkError("Temporary launcher path is not shell-neutral")
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write("#!/bin/sh\n" + "rm -f -- " + shlex.quote(filename) + "\n" + shlex.join(argv) + "\n")
+        self.client.json(["pane", "run", pane, "/bin/sh", filename])
+
+    def _verify_child(self, pane_id: str, agent: str, parent_id: str, expected_id: str | None = None) -> str | None:
+        deadline = time.monotonic() + START_SECONDS
+        while time.monotonic() < deadline:
+            pane = object_value(self.client.json(["pane", "get", pane_id]).get("pane"), "child pane")
+            if pane.get("agent_status") == "blocked":
+                raise ForkError("Child requires login, trust, or permission input; no approval was answered")
+            if pane.get("agent") == agent:
+                process = foreground(self.client, pane_id, agent)
+                if self.mode == "question" and not ("--tools" in process["argv"] or "--sandbox" in process["argv"]):
+                    raise ForkError("Child process argv does not contain question restrictions")
+                if agent in ("gjc", "omp"):
+                    try:
+                        record = read_record(state_root(self.env), self.env.get("HERDR_SOCKET_PATH", ""), pane, process["pid"])
+                        child_id = native_id(record["session_id"])
+                        if self.mode == "question" and not record.get("question_ready"):
+                            raise ForkError("Child question guard not ready")
+                    except RegistryError:
+                        time.sleep(POLL_SECONDS)
+                        continue
+                else:
+                    try:
+                        child_id = self._native_reference(pane, agent)
+                    except ForkError:
+                        if agent == "claude" and expected_id and pane.get("agent_status") in ("idle", "done") and expected_id in process["argv"]:
+                            return expected_id
+                        if agent == "codex" and pane.get("agent_status") == "idle":
+                            return None
+                        time.sleep(POLL_SECONDS)
+                        continue
+                if child_id == parent_id:
+                    raise ForkError("Child reported the parent session ID instead of an independent fork")
+                if pane.get("agent_status") in ("idle", "done"):
+                    return child_id
+            time.sleep(POLL_SECONDS)
+        raise ForkError("Child startup/identity could not be verified before timeout")
+
+    def _picker(self, pane_id: str, agent: str) -> None:
+        keys = ["ctrl+t", "esc"] if agent == "codex" else ["esc", "esc"]
+        for key in keys:
+            self.client.json(["agent", "send-keys", pane_id, key])
+            time.sleep(POLL_SECONDS)
 
 
-def _herdr_executable(env: Mapping[str, str]) -> str:
-    configured = _nonempty_string(env.get("HERDR_BIN_PATH"))
-    if configured:
-        return configured
-    discovered = shutil.which("herdr")
-    if discovered:
-        return discovered
-    raise ForkError("Herdr is not available in PATH and HERDR_BIN_PATH was not provided.")
-
-
-def _notify_failure(client: HerdrClient, message: str) -> None:
-    body = f"{message} Logs: herdr plugin log list --plugin {PLUGIN_ID} --limit 5"
-    try:
-        client.json(
-            [
-                "notification",
-                "show",
-                f"{ACTION_TITLE} failed",
-                "--body",
-                body,
-                "--sound",
-                "request",
-            ]
-        )
-    except Exception:
-        pass
-
-
-def run(env: Mapping[str, str], destination: str = "tab") -> ForkResult:
-    if env.get("HERDR_ENV") != "1":
-        raise ForkError("This action must run inside a Herdr-managed session.")
-    client = HerdrClient(_herdr_executable(env))
-    try:
-        context = load_invocation_context(env)
-        codex_home = _nonempty_string(env.get("CODEX_HOME"))
-        if codex_home and (not Path(codex_home).is_absolute() or not Path(codex_home).is_dir()):
-            raise ForkError("CODEX_HOME is set but is not an existing absolute directory.")
-        claude_config_dir = _nonempty_string(env.get("CLAUDE_CONFIG_DIR"))
-        if claude_config_dir and (
-            not Path(claude_config_dir).is_absolute() or not Path(claude_config_dir).is_dir()
-        ):
-            raise ForkError("CLAUDE_CONFIG_DIR is set but is not an existing absolute directory.")
-        return ForkWorkflow(
-            client,
-            context,
-            codex_home=codex_home,
-            claude_config_dir=claude_config_dir,
-            destination=destination,
-        ).execute()
-    except ForkError as exc:
-        _notify_failure(client, str(exc))
-        raise
+def register(client: HerdrClient, env: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
+    pane_id = env.get("HERDR_PANE_ID", "")
+    pane = object_value(client.json(["pane", "get", pane_id]).get("pane"), "owner pane")
+    kind = payload.get("agent")
+    if kind not in ("gjc", "omp") or pane.get("agent") != kind:
+        raise ForkError("Registration agent does not match the pane owner")
+    process = foreground(client, pane_id, kind)
+    pid = process["pid"]
+    if payload.get("pid") != pid or not descendant_of(os.getpid(), pid):
+        raise ForkError("Registration must originate inside the exact foreground owner process")
+    session = native_id(payload.get("session_id"))
+    cwd = str(Path(payload.get("cwd", "")).resolve())
+    if cwd != str(Path(pane.get("foreground_cwd") or pane.get("cwd", "")).resolve()):
+        raise ForkError("Registration cwd does not match owner cwd")
+    safe = {key: payload[key] for key in ("model", "profile", "thinking", "session_file", "bridge_version", "question_ready", "registration_valid") if key in payload}
+    environment = payload.get("environment", {})
+    if not isinstance(environment, dict) or any(key not in ENVIRONMENT_KEYS[kind] for key in environment):
+        raise ForkError("Owner registration contains unsupported environment keys")
+    safe["environment"] = {key: value for key, value in environment.items() if isinstance(value, str)}
+    session_file = safe.get("session_file")
+    if session_file is not None and (not isinstance(session_file, str) or not Path(session_file).is_absolute()):
+        raise ForkError("Owner registration transcript must be an absolute path")
+    if isinstance(session_file, str) and not Path(session_file).is_file():
+        safe.pop("session_file")
+    safe.update(agent=kind, pane_id=pane_id, terminal_id=pane["terminal_id"], pid=pid,
+                process_start=process_start(pid), session_id=session, cwd=cwd)
+    path = write_record(state_root(env), env.get("HERDR_SOCKET_PATH", ""), safe)
+    return {"status": "registered", "path": str(path), "session_id": session}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=ACTION_TITLE)
-    parser.add_argument("--destination", choices=DESTINATIONS, default="tab")
+    parser = argparse.ArgumentParser(description="Independent native question forks in Herdr")
+    parser.add_argument("--destination", choices=DESTINATIONS, default="pane")
+    parser.add_argument("--mode", choices=("question", "fork", "message"), default="question")
+    parser.add_argument("--direction", choices=("right", "down"), default="right")
+    parser.add_argument("--no-focus", action="store_true")
+    parser.add_argument("--pane")
+    parser.add_argument("--session")
+    parser.add_argument("--register", action="store_true")
     args = parser.parse_args(argv)
     try:
-        result = run(os.environ, destination=args.destination)
-    except ForkError as exc:
-        print(f"{ACTION_TITLE} failed: {exc}", file=sys.stderr)
+        if os.environ.get("HERDR_ENV") != "1":
+            raise ForkError("Run inside Herdr or through an installed Herdr plugin action")
+        client = HerdrClient(os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr") or "herdr", args.session)
+        if args.register:
+            payload = json.load(sys.stdin)
+            if not isinstance(payload, dict):
+                raise ForkError("Registration payload must be an object")
+            output = register(client, os.environ, payload)
+        else:
+            context = json.loads(os.environ.get("HERDR_PLUGIN_CONTEXT_JSON", "{}"))
+            if args.pane:
+                pane = object_value(client.json(["pane", "get", args.pane]).get("pane"), "explicit pane")
+                context = {"focused_pane_id": args.pane, "workspace_id": pane["workspace_id"]}
+            output = asdict(ForkWorkflow(client, context, os.environ, args.destination, args.mode, args.direction, not args.no_focus).execute())
+        print(json.dumps(output, ensure_ascii=False, sort_keys=True))
+        return 0
+    except (ForkError, RegistryError, ContractError, OSError, ValueError) as exc:
+        print(f"Question fork failed: {exc}", file=sys.stderr)
         return 1
-    print(
-        json.dumps(
-            {
-                "status": "ok",
-                "tab_id": result.tab_id,
-                "pane_id": result.fork_pane_id,
-                "source_session_id": result.source_session_id,
-                "fork_session_id": result.fork_session_id,
-                "destination": result.destination,
-                "workspace_id": result.workspace_id,
-                "cwd": result.cwd,
-            },
-            sort_keys=True,
-        )
-    )
-    return 0
 
 
 if __name__ == "__main__":
