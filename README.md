@@ -121,8 +121,12 @@ interface, never replace other entries. Start a **new** source process afterward
 Existing processes are not remotely restarted or modified.
 
 GJC 0.19.0 can retain a startup manager facade after `/new`, `/resume`, `/fork` or
-`/tree`; the bridge invalidates registration instead of cloning stale identity.
-Restart GJC with the desired session before forking again.
+`/tree`; the bridge revokes the owner record before admitting navigation instead
+of cloning stale identity. Revocation receives up to three attempts; an
+unconfirmed tombstone cancels navigation and reports invalidation pending.
+A cancelled navigation can resume registration only on a new turn with the
+exact unchanged conversation and a confirmed tombstone. A completed switch
+requires restarting GJC with the desired session before forking again.
 
 State lives at `~/.local/state/herdr/plugins/seungwonme.panel-fork/owners/`, or the
 Herdr plugin state directory. `HERDR_PANEL_FORK_STATE_DIR` explicitly relocates it.

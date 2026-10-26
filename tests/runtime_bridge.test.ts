@@ -104,7 +104,7 @@ describe("registration readiness", () => {
 				getThinkingLevel: () => "high",
 				setActiveTools: async () => {},
 			},
-			{ register: run, now },
+			{ register: run, now, wait: async () => {} },
 		);
 		shutdowns.push(() => handlers.get("session_shutdown")?.({}, ctx));
 		return { handlers, warnings, ctx };
@@ -182,8 +182,145 @@ describe("registration readiness", () => {
 		await f.handlers.get("agent_end")?.({}, f.ctx);
 		expect(calls).toBe(invalidatedCalls);
 		expect(f.warnings.some((message) => message.includes("invalidated"))).toBe(
-			true,
+			false,
 		);
+		expect(
+			f.warnings.some((message) => message.includes("invalidation pending")),
+		).toBe(true);
+	});
+
+	test("failed tombstone cancels navigation instead of claiming invalidation", async () => {
+		const payloads: Record<string, unknown>[] = [];
+		const f = fixture(async (payload) => {
+			payloads.push(payload);
+			return payload.registration_valid === false
+				? { status: "not_ready", reason: "foreground_not_visible" }
+				: { status: "registered" };
+		});
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		expect(await f.handlers.get("session_before_switch")?.({}, f.ctx)).toEqual({
+			cancel: true,
+		});
+		expect(payloads.filter((p) => p.registration_valid === false)).toHaveLength(
+			3,
+		);
+		expect(
+			f.warnings.some((message) => message.includes("invalidation pending")),
+		).toBe(true);
+		expect(
+			f.warnings.some((message) => message.includes("invalidated by")),
+		).toBe(false);
+	});
+
+	test("transient invalidation is retried and confirmed before navigation", async () => {
+		let attempts = 0;
+		const f = fixture(async (payload) => {
+			if (payload.registration_valid === false && ++attempts === 1)
+				return { status: "not_ready", reason: "foreground_not_visible" };
+			return { status: "registered" };
+		});
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		expect(
+			await f.handlers.get("session_before_switch")?.({}, f.ctx),
+		).toBeUndefined();
+		expect(attempts).toBe(2);
+		await f.handlers.get("session_switch")?.({}, f.ctx);
+		expect(attempts).toBe(2);
+		expect(
+			f.warnings.some((message) => message.includes("invalidated by")),
+		).toBe(true);
+	});
+
+	test("cancelled navigation restores the exact unchanged conversation on a new turn", async () => {
+		const payloads: Record<string, unknown>[] = [];
+		const f = fixture(async (payload) => {
+			payloads.push(payload);
+			return { status: "registered" };
+		});
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		await f.handlers.get("session_before_switch")?.({}, f.ctx);
+		await f.handlers.get("agent_end")?.({}, f.ctx);
+		expect(payloads.map((p) => p.registration_valid)).toEqual([true, false]);
+		await f.handlers.get("before_agent_start")?.({}, f.ctx);
+		expect(payloads.map((p) => p.registration_valid)).toEqual([
+			true,
+			false,
+			true,
+		]);
+	});
+
+	test("completed navigation cannot be rearmed by another cancelled navigation", async () => {
+		const payloads: Record<string, unknown>[] = [];
+		const f = fixture(async (payload) => {
+			payloads.push(payload);
+			return { status: "registered" };
+		});
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		await f.handlers.get("session_before_switch")?.({}, f.ctx);
+		await f.handlers.get("session_switch")?.({}, f.ctx);
+		await f.handlers.get("session_before_switch")?.({}, f.ctx);
+		await f.handlers.get("before_agent_start")?.({}, f.ctx);
+		expect(payloads.map((p) => p.registration_valid)).toEqual([true, false]);
+	});
+
+	test("failed revocation is confirmed before an unchanged turn recovers", async () => {
+		let recovered = false;
+		const payloads: Record<string, unknown>[] = [];
+		const f = fixture(async (payload) => {
+			payloads.push(payload);
+			if (payload.registration_valid === false && !recovered)
+				throw new Error("temporarily_unavailable");
+			return { status: "registered" };
+		});
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		expect(await f.handlers.get("session_before_switch")?.({}, f.ctx)).toEqual({
+			cancel: true,
+		});
+		recovered = true;
+		await f.handlers.get("before_agent_start")?.({}, f.ctx);
+		expect(payloads.slice(-2).map((p) => p.registration_valid)).toEqual([
+			false,
+			true,
+		]);
+	});
+
+	test("hard invalidation errors block all navigation kinds without successful claims", async () => {
+		for (const name of [
+			"session_before_switch",
+			"session_before_branch",
+			"session_before_tree",
+		]) {
+			const f = fixture(async (payload) => {
+				if (payload.registration_valid === false)
+					throw new Error("owner_changed");
+				return { status: "registered" };
+			});
+			await f.handlers.get("session_start")?.({}, f.ctx);
+			expect(await f.handlers.get(name)?.({}, f.ctx)).toEqual({ cancel: true });
+			expect(f.warnings).toHaveLength(1);
+			expect(f.warnings[0]).toContain("invalidation pending");
+		}
+	});
+
+	test("elapsed invalidation deadline does not restart grace or keep retrying", async () => {
+		let now = 0;
+		let attempts = 0;
+		const f = fixture(
+			async (payload) => {
+				if (payload.registration_valid === false) {
+					attempts++;
+					now = 5000;
+					return { status: "not_ready", reason: "foreground_not_visible" };
+				}
+				return { status: "registered" };
+			},
+			() => now,
+		);
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		expect(await f.handlers.get("session_before_switch")?.({}, f.ctx)).toEqual({
+			cancel: true,
+		});
+		expect(attempts).toBe(1);
 	});
 });
 
@@ -576,7 +713,7 @@ describe("optional read-only tool boundary", () => {
 				ui: { notify: (message: string) => warnings.push(message) },
 			},
 		);
-		expect(warnings[0]).toContain("invalidated");
+		expect(warnings[0]).toContain("invalidation pending");
 		await handlers.get("session_shutdown")?.({}, context());
 	});
 	test("read-only forks cancel all in-process identity navigation", async () => {
