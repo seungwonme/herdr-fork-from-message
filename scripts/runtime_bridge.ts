@@ -35,9 +35,11 @@ type Registration = {
 type BridgeOptions = {
 	register?: (payload: Record<string, unknown>) => Promise<Registration>;
 	now?: () => number;
+	wait?: (milliseconds: number) => Promise<void>;
 };
 
 const STARTUP_GRACE_MS = 10_000;
+const INVALIDATION_TIMEOUT_MS = 4000;
 
 const environmentKeys: Record<PiAgent, readonly string[]> = {
 	gjc: ["GJC_CONFIG_DIR", "GJC_CODING_AGENT_DIR"],
@@ -149,7 +151,22 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 	let nonOwner = false;
 	let stopped = false;
 	let notReadySince: number | undefined;
+	let transitionIdentity: string | undefined;
+	let tombstoneConfirmed = false;
+	let navigationCompleted = false;
 	const now = options.now ?? Date.now;
+	const wait =
+		options.wait ??
+		((milliseconds: number) =>
+			new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+
+	function conversationIdentity(ctx: Context) {
+		return JSON.stringify([
+			ctx.sessionManager.getSessionId(),
+			ctx.sessionManager.getSessionFile() ?? null,
+			ctx.cwd,
+		]);
+	}
 
 	async function guard(ctx: Context) {
 		if (!readOnly) return;
@@ -173,9 +190,9 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 		ready = true;
 	}
 
-	async function publish(invalidate = false) {
+	async function publish(invalidate = false, timeout = 4000): Promise<boolean> {
 		if (busy || !current || nonOwner || stopped || (invalidated && !invalidate))
-			return;
+			return false;
 		busy = true;
 		try {
 			const ctx = current;
@@ -221,7 +238,7 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 						const child = spawn("python3", [helper, "--register"], {
 							env: helperEnvironment,
 							stdio: ["pipe", "pipe", "pipe"],
-							timeout: 4000,
+							timeout,
 						});
 						let detail = "";
 						let output = "";
@@ -254,14 +271,14 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 						child.stdin.on("error", () => {});
 						child.stdin.end(JSON.stringify(payload));
 					});
-			if (stopped || (invalidated && !invalidate)) return;
+			if (stopped || (invalidated && !invalidate)) return false;
 			if (
 				receipt.status === "ignored" &&
 				receipt.reason === "nested_non_owner"
 			) {
 				nonOwner = true;
 				if (timer) clearInterval(timer);
-				return;
+				return false;
 			}
 			if (
 				receipt.status === "not_ready" &&
@@ -269,8 +286,9 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 					receipt.reason ?? "",
 				)
 			) {
+				if (invalidate) return false;
 				notReadySince ??= now();
-				if (now() - notReadySince < STARTUP_GRACE_MS) return;
+				if (now() - notReadySince < STARTUP_GRACE_MS) return false;
 				throw new Error(
 					`${receipt.reason} after startup grace (candidate_count=${receipt.diagnostics?.candidate_count ?? 0})`,
 				);
@@ -279,21 +297,51 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 				throw new Error("Invalid registration receipt");
 			notReadySince = undefined;
 			warned = false;
+			return true;
 		} catch (error) {
-			if (!warned && !stopped && (!invalidated || invalidate)) {
+			if (!invalidate && !warned && !stopped && !invalidated) {
 				current?.ui.notify(
 					`Panel Fork registration unavailable: ${String(error)}`,
 					"warning",
 				);
 				warned = true;
 			}
+			return false;
 		} finally {
 			busy = false;
 		}
 	}
 
+	async function invalidateOwner(ctx: Context): Promise<boolean> {
+		const deadline = now() + INVALIDATION_TIMEOUT_MS;
+		invalidated = true;
+		ready = false;
+		if (timer) clearInterval(timer);
+		timer = undefined;
+		while (busy && !stopped && now() < deadline) await wait(10);
+		if (nonOwner) return true;
+		for (
+			let attempt = 0;
+			attempt < 3 && !stopped && !busy && now() < deadline;
+			attempt++
+		) {
+			if (tombstoneConfirmed) return true;
+			if (await publish(true, Math.max(1, deadline - now()))) {
+				tombstoneConfirmed = true;
+				return true;
+			}
+			if (attempt < 2) await wait(100);
+		}
+		if (!stopped)
+			ctx.ui.notify(
+				"Panel Fork invalidation pending: the previous owner record could not be revoked. Session navigation was not confirmed; keep the current conversation until registration recovers.",
+				"warning",
+			);
+		return false;
+	}
+
 	const update = async (_event: Event, ctx: Context) => {
-		if (stopped || nonOwner) return;
+		if (stopped || nonOwner || invalidated) return;
 		current = ctx;
 		await guard(ctx);
 		if (invalidated) return;
@@ -312,33 +360,57 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 		"session_before_branch",
 		"session_before_tree",
 	]) {
-		api.on(event, () => (readOnly ? { cancel: true } : undefined));
+		api.on(event, async (_value, ctx) => {
+			if (readOnly) return { cancel: true };
+			if (
+				agent !== "gjc" ||
+				stopped ||
+				nonOwner ||
+				navigationCompleted ||
+				!current
+			)
+				return;
+			transitionIdentity = conversationIdentity(ctx);
+			if (!(await invalidateOwner(ctx))) return { cancel: true };
+		});
 	}
 	for (const event of ["session_switch", "session_branch", "session_tree"])
 		api.on(event, async (value, ctx) => {
 			if (agent === "gjc") {
 				// GJC 0.19 may retain the startup manager in extension contexts after a
 				// cold-sidecar transition. Refuse stale identity rather than re-publish it.
-				invalidated = true;
-				ready = false;
-				if (timer) clearInterval(timer);
-				// Let any preceding heartbeat finish, then overwrite it with a tombstone.
-				while (busy) await new Promise((resolve) => setTimeout(resolve, 10));
-				await publish(true);
-				ctx.ui.notify(
-					"Panel Fork registration invalidated by session navigation. Restart GJC to register its current session safely.",
-					"warning",
-				);
+				transitionIdentity = undefined;
+				navigationCompleted = true;
+				current ??= ctx;
+				if (await invalidateOwner(ctx))
+					ctx.ui.notify(
+						"Panel Fork registration invalidated by session navigation. Restart GJC to register its current session safely.",
+						"warning",
+					);
 				return;
 			}
 			await update(value, ctx);
 		});
 	api.on("session_shutdown", () => {
 		stopped = true;
+		transitionIdentity = undefined;
 		if (timer) clearInterval(timer);
 		current = undefined;
 	});
 	api.on("before_agent_start", async (event, ctx) => {
+		// A cancelled transition has no switch event. Only the unchanged native
+		// conversation may recover, and only after a confirmed tombstone.
+		if (
+			invalidated &&
+			!navigationCompleted &&
+			transitionIdentity === conversationIdentity(ctx)
+		) {
+			if (!tombstoneConfirmed && !(await invalidateOwner(ctx))) return;
+			invalidated = false;
+			tombstoneConfirmed = false;
+			transitionIdentity = undefined;
+			ready = !readOnly;
+		}
 		await update(event, ctx);
 		if (!readOnly) return;
 		const original = event.systemPrompt ?? [];
