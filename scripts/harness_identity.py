@@ -11,6 +11,22 @@ from agent_contracts import AGENTS, ContractError
 ALIASES = {"cursor-agent": "cursor", "agent": "cursor", "antigravity-cli": "agy", "antigravity_cli": "agy"}
 
 
+def candidate_diagnostics(processes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    limit = 8
+    return {
+        "candidate_count": min(len(processes), limit),
+        "candidate_pids": [p["pid"] for p in processes[:limit]
+                           if type(p.get("pid")) is int and 1 < p["pid"] <= 2147483647],
+        "candidates_truncated": len(processes) > limit,
+    }
+
+
+class ForegroundNotReady(ContractError):
+    def __init__(self):
+        self.diagnostics = candidate_diagnostics([])
+        super().__init__(f"Pane has no identifiable foreground harness process ({self.diagnostics})")
+
+
 def entrypoint_argv(process: Mapping[str, Any]) -> list[str]:
     argv = process.get("argv")
     if argv is None and process.get("argv0") in AGENTS:
@@ -55,12 +71,18 @@ def process_product(process: Mapping[str, Any]) -> str | None:
 
 def select_process(processes: Sequence[Mapping[str, Any]], reported: str | None = None) -> tuple[str, dict[str, Any]]:
     matches = [(kind, dict(p)) for p in processes if (kind := process_product(p))]
+    if not matches:
+        claimed = [p for p in processes if p.get("name") in AGENTS or p.get("argv0") in AGENTS]
+        if claimed:
+            raise ContractError(f"Foreground harness arguments are unverifiable ({candidate_diagnostics(claimed)})")
+        raise ForegroundNotReady()
     if reported:
         reported = ALIASES.get(reported, reported)
-        # OMO's launcher deliberately reports the pi-family hint to Herdr.
-        matches = [(kind, p) for kind, p in matches if kind == reported or (reported == "pi" and kind == "omo")]
-    if len(matches) != 1:
-        raise ContractError("Pane must have exactly one identifiable foreground harness process")
+    # Count all harnesses before checking the hint; a foreign owner is not an
+    # absent owner. OMO deliberately reports the pi-family hint to Herdr.
+    if len(matches) != 1 or (reported and matches[0][0] != reported and not (reported == "pi" and matches[0][0] == "omo")):
+        diagnostics = candidate_diagnostics([p for _, p in matches])
+        raise ContractError(f"Pane must have exactly one matching identifiable foreground harness process ({diagnostics})")
     kind, process = matches[0]
     if process.get("argv") is None:
         process["argv"] = entrypoint_argv(process)

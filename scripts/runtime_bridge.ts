@@ -27,6 +27,17 @@ type API = {
 	setActiveTools(names: string[]): Promise<void>;
 };
 type PiAgent = "gjc" | "omp" | "pi" | "omo";
+type Registration = {
+	status: "registered" | "not_ready" | "ignored";
+	reason?: string;
+	diagnostics?: { candidate_count?: number; candidate_pids?: number[] };
+};
+type BridgeOptions = {
+	register?: (payload: Record<string, unknown>) => Promise<Registration>;
+	now?: () => number;
+};
+
+const STARTUP_GRACE_MS = 10_000;
 
 const environmentKeys: Record<PiAgent, readonly string[]> = {
 	gjc: ["GJC_CONFIG_DIR", "GJC_CODING_AGENT_DIR"],
@@ -116,7 +127,7 @@ export function readOnlyGuard(event: Event) {
 	}
 }
 
-export default function runtimeBridge(api: API) {
+export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 	if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_PANE_ID) return;
 	const agent = runtimeAgent(process.env, process.execPath, process.argv);
 	if (!agent) {
@@ -135,6 +146,10 @@ export default function runtimeBridge(api: API) {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let warned = false;
 	let invalidated = false;
+	let nonOwner = false;
+	let stopped = false;
+	let notReadySince: number | undefined;
+	const now = options.now ?? Date.now;
 
 	async function guard(ctx: Context) {
 		if (!readOnly) return;
@@ -159,7 +174,8 @@ export default function runtimeBridge(api: API) {
 	}
 
 	async function publish(invalidate = false) {
-		if (busy || !current || (invalidated && !invalidate)) return;
+		if (busy || !current || nonOwner || stopped || (invalidated && !invalidate))
+			return;
 		busy = true;
 		try {
 			const ctx = current;
@@ -199,27 +215,72 @@ export default function runtimeBridge(api: API) {
 			if (helperEnvironment.HERDR_PANEL_FORK_STATE_DIR)
 				helperEnvironment.HERDR_PLUGIN_STATE_DIR =
 					helperEnvironment.HERDR_PANEL_FORK_STATE_DIR;
-			await new Promise<void>((resolve, reject) => {
-				const child = spawn("python3", [helper, "--register"], {
-					env: helperEnvironment,
-					stdio: ["pipe", "ignore", "pipe"],
-					timeout: 4000,
-				});
-				let detail = "";
-				child.stderr.on("data", (data) => {
-					detail += data.toString();
-				});
-				child.on("error", reject);
-				child.on("close", (code) =>
-					code === 0
-						? resolve()
-						: reject(new Error(detail || "owner registration failed")),
+			const receipt = options.register
+				? await options.register(payload)
+				: await new Promise<Registration>((resolve, reject) => {
+						const child = spawn("python3", [helper, "--register"], {
+							env: helperEnvironment,
+							stdio: ["pipe", "pipe", "pipe"],
+							timeout: 4000,
+						});
+						let detail = "";
+						let output = "";
+						child.stdout.on("data", (data) => {
+							output = (output + data.toString()).slice(0, 8192);
+						});
+						child.stderr.on("data", (data) => {
+							detail = (detail + data.toString()).slice(0, 2048);
+						});
+						child.on("error", reject);
+						child.on("close", (code) => {
+							if (code !== 0) {
+								reject(new Error(detail || "owner registration failed"));
+								return;
+							}
+							try {
+								const result = JSON.parse(output);
+								if (
+									!result ||
+									!["registered", "not_ready", "ignored"].includes(
+										result.status,
+									)
+								)
+									throw new Error("Invalid registration receipt");
+								resolve(result);
+							} catch {
+								reject(new Error("Invalid registration receipt"));
+							}
+						});
+						child.stdin.on("error", () => {});
+						child.stdin.end(JSON.stringify(payload));
+					});
+			if (stopped || (invalidated && !invalidate)) return;
+			if (
+				receipt.status === "ignored" &&
+				receipt.reason === "nested_non_owner"
+			) {
+				nonOwner = true;
+				if (timer) clearInterval(timer);
+				return;
+			}
+			if (
+				receipt.status === "not_ready" &&
+				["foreground_not_visible", "pane_owner_not_visible"].includes(
+					receipt.reason ?? "",
+				)
+			) {
+				notReadySince ??= now();
+				if (now() - notReadySince < STARTUP_GRACE_MS) return;
+				throw new Error(
+					`${receipt.reason} after startup grace (candidate_count=${receipt.diagnostics?.candidate_count ?? 0})`,
 				);
-				child.stdin.on("error", () => {});
-				child.stdin.end(JSON.stringify(payload));
-			});
+			}
+			if (receipt.status !== "registered")
+				throw new Error("Invalid registration receipt");
+			notReadySince = undefined;
+			warned = false;
 		} catch (error) {
-			if (!warned) {
+			if (!warned && !stopped && (!invalidated || invalidate)) {
 				current?.ui.notify(
 					`Panel Fork registration unavailable: ${String(error)}`,
 					"warning",
@@ -232,11 +293,12 @@ export default function runtimeBridge(api: API) {
 	}
 
 	const update = async (_event: Event, ctx: Context) => {
+		if (stopped || nonOwner) return;
 		current = ctx;
 		await guard(ctx);
 		if (invalidated) return;
 		await publish();
-		if (!timer) {
+		if (!timer && !nonOwner && !stopped && !invalidated) {
 			timer = setInterval(() => {
 				void publish();
 			}, 5000);
@@ -272,6 +334,7 @@ export default function runtimeBridge(api: API) {
 			await update(value, ctx);
 		});
 	api.on("session_shutdown", () => {
+		stopped = true;
 		if (timer) clearInterval(timer);
 		current = undefined;
 	});

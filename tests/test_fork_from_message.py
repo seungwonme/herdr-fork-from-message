@@ -279,6 +279,130 @@ class WorkflowTests(unittest.TestCase):
             self.assertFalse(any(c[:2] == ("agent", "start") for c in client.calls))
 
 
+class RegistrationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.client = FakeClient(self.tmp.name, "gjc")
+        self.env = {"HERDR_PANE_ID": "w:p1", "HERDR_SOCKET_PATH": "/fixture/socket",
+                    "HERDR_PANEL_FORK_STATE_DIR": self.tmp.name,
+                    "GJC_HERDR_PANE_OWNER": '{"pid":99999,"paneId":"old:pane"}'}
+        self.payload = {"pid": 100, "agent": "gjc", "session_id": SOURCE, "cwd": self.tmp.name}
+        self.parents = patch.object(module.os, "getppid", return_value=100)
+        self.start = patch.object(module, "process_start", return_value="fixture-start")
+        self.write = patch.object(module, "write_record", return_value=Path(self.tmp.name) / "owner.json")
+        self.ancestry = patch.object(module, "registration_ancestor", return_value=None)
+        for item in (self.parents, self.start, self.write, self.ancestry):
+            item.start()
+            self.addCleanup(item.stop)
+
+    def register(self):
+        return module.register(self.client, self.env, self.payload)
+
+    def process_list(self, processes):
+        original = self.client.json
+        return patch.object(self.client, "json", side_effect=lambda args, **kw:
+                            {"process_info": {"foreground_processes": processes}}
+                            if args[:2] == ["pane", "process-info"] else original(args, **kw))
+
+    def test_zero_candidates_returns_readiness_without_writing(self):
+        with self.process_list([]), patch.object(module, "write_record") as write:
+            self.assertEqual(self.register()["status"], "not_ready")
+            write.assert_not_called()
+
+    def test_native_label_not_ready_does_not_claim_a_visible_process(self):
+        original = self.client.pane
+        with patch.object(self.client, "pane", side_effect=lambda child=False: original(child) | {"agent": None}), patch.object(module, "write_record") as write:
+            receipt = self.register()
+        self.assertEqual(receipt["status"], "not_ready")
+        self.assertEqual(receipt["reason"], "pane_owner_not_visible")
+        self.assertEqual(receipt["diagnostics"]["candidate_pids"], [100])
+        write.assert_not_called()
+
+    def test_claimed_agent_with_missing_arguments_is_not_startup_readiness(self):
+        with self.process_list([{"pid": 100, "name": "gjc", "argv": []}]), patch.object(module, "write_record") as write:
+            with self.assertRaisesRegex(ContractError, "unverifiable"):
+                self.register()
+            write.assert_not_called()
+
+    def test_duplicate_and_foreign_candidates_remain_hard_failures(self):
+        for processes in ([{"pid": 100, "argv": ["gjc"]}, {"pid": 200, "argv": ["gjc"]}],
+                          [{"pid": 100, "argv": ["codex"]}]):
+            with self.subTest(processes=processes), self.process_list(processes), patch.object(module, "write_record") as write:
+                with self.assertRaises(ContractError) as caught:
+                    self.register()
+                self.assertIn("candidate_count", str(caught.exception))
+                self.assertNotIn("argv", str(caught.exception))
+                write.assert_not_called()
+
+    def test_proven_nested_non_owner_is_ignored_without_writing(self):
+        self.payload["pid"] = 200
+        with patch.object(module.os, "getppid", return_value=200), patch.object(module, "registration_ancestor", return_value=100), patch.object(module, "write_record") as write:
+            self.assertEqual(self.register()["status"], "ignored")
+            write.assert_not_called()
+
+    def test_nested_ancestor_outside_foreground_group_cannot_publish(self):
+        with patch.object(module, "registration_ancestor", return_value=50), patch.object(module, "write_record") as write:
+            self.assertEqual(self.register()["status"], "ignored")
+            write.assert_not_called()
+
+    def test_nested_runtime_is_ignored_even_when_parent_and_child_are_both_listed(self):
+        self.payload["pid"] = 200
+        processes = [{"pid": 100, "argv": ["gjc"]}, {"pid": 200, "argv": ["gjc"]}]
+        with self.process_list(processes), patch.object(module.os, "getppid", return_value=200), patch.object(module, "registration_ancestor", return_value=100), patch.object(module, "write_record") as write:
+            self.assertEqual(self.register()["status"], "ignored")
+            write.assert_not_called()
+
+    def test_foreign_pane_metadata_is_not_readiness(self):
+        original = self.client.pane
+        with patch.object(self.client, "pane", side_effect=lambda child=False: original(child) | {"agent": "codex"}), patch.object(module, "write_record") as write:
+            with self.assertRaisesRegex(module.ForkError, "does not match"):
+                self.register()
+            write.assert_not_called()
+
+    def test_changed_terminal_before_publication_blocks_write(self):
+        original = self.client.pane
+        reads = 0
+
+        def changed(child=False):
+            nonlocal reads
+            reads += 1
+            return original(child) | {"terminal_id": "original" if reads == 1 else "changed"}
+
+        with patch.object(self.client, "pane", side_effect=changed), patch.object(module, "write_record") as write:
+            with self.assertRaisesRegex(module.ForkError, "changed before"):
+                self.register()
+            write.assert_not_called()
+
+    def test_stale_inherited_marker_does_not_block_real_foreground_owner(self):
+        self.assertEqual(self.register()["status"], "registered")
+
+    def test_unrelated_pid_and_forged_parent_cannot_register(self):
+        self.payload["pid"] = 200
+        with patch.object(module.os, "getppid", return_value=200), patch.object(module, "write_record") as write:
+            with self.assertRaises(module.ForkError):
+                self.register()
+            write.assert_not_called()
+        with patch.object(module.os, "getppid", return_value=300), patch.object(module, "write_record") as write:
+            with self.assertRaises(module.ForkError):
+                self.register()
+            write.assert_not_called()
+
+
+class AncestryTests(unittest.TestCase):
+    def test_outer_coding_agent_is_identified_without_trusting_environment(self):
+        for parent_command, expected in (("gjc --resume /fixture.jsonl", 50), ("gjc user's prompt", 50), ("zsh", None)):
+            rows = {100: "50 gjc", 50: "2 " + parent_command}
+            with self.subTest(parent=parent_command), patch.object(module.subprocess, "run", side_effect=lambda argv, **kwargs: type("Result", (), {"stdout": rows[int(argv[2])]})()):
+                self.assertEqual(module.registration_ancestor(100, 2), expected)
+
+    def test_unrelated_or_cyclic_ancestry_is_rejected(self):
+        for rows in ({100: "1 gjc"}, {100: "50 gjc", 50: "100 zsh"}):
+            with self.subTest(rows=rows), patch.object(module.subprocess, "run", side_effect=lambda argv, **kwargs: type("Result", (), {"stdout": rows[int(argv[2])]})()):
+                with self.assertRaisesRegex(module.ForkError, "does not reach"):
+                    module.registration_ancestor(100, 2)
+
+
 class EntrypointTests(unittest.TestCase):
     def test_manifest_primary_actions_use_the_normal_cli_default(self):
         manifest = (Path(__file__).resolve().parents[1] / "herdr-plugin.toml").read_text()

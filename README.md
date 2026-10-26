@@ -99,6 +99,14 @@ PID/process start, server socket and terminal. Owner-only records expire after
 20 seconds and refresh every five seconds. No log globbing, recent-file guessing,
 process-environment scraping or transcript rewriting is used.
 
+Startup registration waits up to ten seconds for the native pane label or
+foreground owner to become visible, retrying on the existing heartbeat. A
+persistent readiness failure warns once; duplicate/foreign owners and invalid
+registration fail immediately with bounded candidate counts and PIDs, not argv.
+A helper launched directly by a nested runtime proves its foreground ancestor
+and skips registration without changing the parent's record. Inherited owner
+markers alone never grant or deny ownership.
+
 For a single new Pi/OMO process, add `--extension <absolute-bridge-path>` to its
 normal launch command. No global configuration change is required for that process:
 

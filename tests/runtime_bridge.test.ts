@@ -33,7 +33,7 @@ function registrationFixture(agent: string, readOnly = false) {
 	const helper = join(directory, "register.py");
 	writeFileSync(
 		helper,
-		'import json, os, sys\nfrom pathlib import Path\nPath(__file__).with_name("registration.json").write_text(sys.stdin.read(), encoding="utf-8")\nPath(__file__).with_name("environment.json").write_text(json.dumps({key: os.environ.get(key) for key in ("HERDR_PLUGIN_STATE_DIR", "HERDR_PANEL_FORK_STATE_DIR")}), encoding="utf-8")\n',
+		'import json, os, sys\nfrom pathlib import Path\nPath(__file__).with_name("registration.json").write_text(sys.stdin.read(), encoding="utf-8")\nPath(__file__).with_name("environment.json").write_text(json.dumps({key: os.environ.get(key) for key in ("HERDR_PLUGIN_STATE_DIR", "HERDR_PANEL_FORK_STATE_DIR")}), encoding="utf-8")\nprint(json.dumps({"status":"registered"}))\n',
 	);
 	Object.assign(process.env, {
 		HERDR_ENV: "1",
@@ -78,6 +78,114 @@ function registrationFixture(agent: string, readOnly = false) {
 			JSON.parse(readFileSync(join(directory, "environment.json"), "utf8")),
 	};
 }
+
+describe("registration readiness", () => {
+	function fixture(
+		run: NonNullable<NonNullable<Parameters<typeof bridge>[1]>["register"]>,
+		now = () => 0,
+	) {
+		Object.assign(process.env, {
+			HERDR_ENV: "1",
+			HERDR_PANE_ID: "fixture",
+			HERDR_PANEL_FORK_AGENT: "gjc",
+			HERDR_PANEL_FORK_READ_ONLY: "0",
+		});
+		const handlers = new Map<string, Handler>();
+		const warnings: string[] = [];
+		const ctx = {
+			...context(),
+			ui: { notify: (message: string) => warnings.push(message) },
+		};
+		bridge(
+			{
+				on: (name, handler) => {
+					handlers.set(name, handler);
+				},
+				getThinkingLevel: () => "high",
+				setActiveTools: async () => {},
+			},
+			{ register: run, now },
+		);
+		shutdowns.push(() => handlers.get("session_shutdown")?.({}, ctx));
+		return { handlers, warnings, ctx };
+	}
+
+	test("not-ready startup followed by success does not warn", async () => {
+		let count = 0;
+		const f = fixture(async () =>
+			++count === 1
+				? { status: "not_ready", reason: "foreground_not_visible" }
+				: { status: "registered" },
+		);
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		await f.handlers.get("agent_end")?.({}, f.ctx);
+		expect(count).toBe(2);
+		expect(f.warnings).toEqual([]);
+	});
+
+	test("persistent unready state warns after the bounded grace", async () => {
+		let now = 0;
+		const f = fixture(
+			async () => ({ status: "not_ready", reason: "foreground_not_visible" }),
+			() => now,
+		);
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		now = 10_000;
+		await f.handlers.get("agent_end")?.({}, f.ctx);
+		await f.handlers.get("agent_end")?.({}, f.ctx);
+		expect(f.warnings).toHaveLength(1);
+		expect(f.warnings[0]).toContain("candidate_count=0");
+	});
+
+	test("duplicate ownership is warned immediately, not retried silently", async () => {
+		const f = fixture(async () => {
+			throw new Error("candidate_count=2 candidate_pids=[100,200]");
+		});
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		expect(f.warnings).toHaveLength(1);
+		expect(f.warnings[0]).toContain("candidate_count=2");
+	});
+
+	test("a nested non-owner stops reporting without a warning", async () => {
+		let calls = 0;
+		const f = fixture(async () => {
+			calls++;
+			return { status: "ignored", reason: "nested_non_owner" };
+		});
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		await f.handlers.get("agent_end")?.({}, f.ctx);
+		expect(calls).toBe(1);
+		expect(f.warnings).toEqual([]);
+	});
+
+	test("shutdown prevents lifecycle events from resurrecting registration", async () => {
+		let calls = 0;
+		const f = fixture(async () => {
+			calls++;
+			return { status: "registered" };
+		});
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		await f.handlers.get("session_shutdown")?.({}, f.ctx);
+		await f.handlers.get("agent_end")?.({}, f.ctx);
+		expect(calls).toBe(1);
+	});
+
+	test("navigation invalidation cannot restart an unready registration", async () => {
+		let calls = 0;
+		const f = fixture(async () => {
+			calls++;
+			return { status: "not_ready", reason: "foreground_not_visible" };
+		});
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		await f.handlers.get("session_switch")?.({}, f.ctx);
+		const invalidatedCalls = calls;
+		await f.handlers.get("agent_end")?.({}, f.ctx);
+		expect(calls).toBe(invalidatedCalls);
+		expect(f.warnings.some((message) => message.includes("invalidated"))).toBe(
+			true,
+		);
+	});
+});
 
 describe("Pi-family product identity", () => {
 	test("a bare Bun runtime can use an explicit product identity", () => {
