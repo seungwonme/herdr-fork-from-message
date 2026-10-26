@@ -1,8 +1,8 @@
 id = "seungwonme.panel-fork"
 name = "Panel Fork"
-version = "0.5.0"
+version = "0.6.0"
 min_herdr_version = "0.9.5"
-description = "Native conversation forks into a new Herdr panel for Claude, Codex, OMP and GJC"
+description = "Native panel forks with Pi/OMO, conditional OpenCode/Copilot and safe unsupported-harness diagnostics"
 platforms = ["macos", "linux"]
 
 [[actions]]

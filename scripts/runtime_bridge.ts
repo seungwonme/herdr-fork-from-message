@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 type Context = {
@@ -26,6 +26,80 @@ type API = {
 	getThinkingLevel(): string | undefined;
 	setActiveTools(names: string[]): Promise<void>;
 };
+type PiAgent = "gjc" | "omp" | "pi" | "omo";
+
+const environmentKeys: Record<PiAgent, readonly string[]> = {
+	gjc: ["GJC_CONFIG_DIR", "GJC_CODING_AGENT_DIR"],
+	omp: ["PI_CONFIG_DIR", "PI_CODING_AGENT_DIR"],
+	pi: ["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"],
+	omo: [
+		"OMO_CODING_AGENT_DIR",
+		"SENPI_CODING_AGENT_DIR",
+		"PI_CODING_AGENT_DIR",
+		"OMO_CODING_AGENT_SESSION_DIR",
+	],
+};
+const xdgKeys = [
+	"XDG_CONFIG_HOME",
+	"XDG_DATA_HOME",
+	"XDG_STATE_HOME",
+	"XDG_CACHE_HOME",
+];
+
+export function runtimeAgent(
+	environment: Record<string, string | undefined>,
+	executable: string,
+	argv: readonly string[],
+): PiAgent | undefined {
+	let product: PiAgent | undefined;
+	// Product executables take precedence over script paths and user arguments.
+	for (const path of [executable, argv[0]]) {
+		if (!path) continue;
+		const name = basename(path).replace(/\.exe$/, "");
+		if (Object.hasOwn(environmentKeys, name)) {
+			product = name as PiAgent;
+			break;
+		}
+	}
+	// Only inspect the runtime entrypoint, never prompts or extension arguments.
+	if (!product) {
+		for (const path of argv.slice(0, 2)) {
+			if (
+				/\/node_modules\/(?:omo-ai\/bin\/omo\.js|@code-yeongyu\/senpi\/dist\/(?:bundle\/)?cli\.js)$/.test(
+					path,
+				)
+			) {
+				product = "omo";
+				break;
+			}
+			if (
+				/\/node_modules\/@earendil-works\/pi-coding-agent\/dist\/(?:bundle\/)?cli\.js$/.test(
+					path,
+				)
+			) {
+				product = "pi";
+				break;
+			}
+		}
+	}
+	const explicit = environment.HERDR_PANEL_FORK_AGENT;
+	if (explicit !== undefined) {
+		if (
+			!Object.hasOwn(environmentKeys, explicit) ||
+			(product && product !== explicit)
+		)
+			return undefined;
+		return explicit as PiAgent;
+	}
+	if (product) return product;
+	if (environment.OMO_NATIVE === "1") return "omo";
+	try {
+		if (JSON.parse(environment.SENPI_BRAND ?? "null")?.command === "omo")
+			return "omo";
+	} catch {
+		// An invalid brand marker is not evidence of product identity.
+	}
+}
 
 const root = dirname(fileURLToPath(import.meta.url));
 const reads = new Set(["read", "search", "find", "ast_grep", "grep", "glob"]);
@@ -44,9 +118,16 @@ export function readOnlyGuard(event: Event) {
 
 export default function runtimeBridge(api: API) {
 	if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_PANE_ID) return;
-	const agent =
-		process.env.HERDR_PANEL_FORK_AGENT ??
-		(process.execPath.split("/").pop() === "gjc" ? "gjc" : "omp");
+	const agent = runtimeAgent(process.env, process.execPath, process.argv);
+	if (!agent) {
+		api.on("session_start", (_event, ctx) => {
+			ctx.ui.notify(
+				"Panel Fork registration unavailable: the Pi-family product could not be identified. Set HERDR_PANEL_FORK_AGENT to the verified product.",
+				"warning",
+			);
+		});
+		return;
+	}
 	const readOnly = process.env.HERDR_PANEL_FORK_READ_ONLY === "1";
 	let current: Context | undefined;
 	let busy = false;
@@ -57,6 +138,10 @@ export default function runtimeBridge(api: API) {
 
 	async function guard(ctx: Context) {
 		if (!readOnly) return;
+		if (agent !== "gjc" && agent !== "omp")
+			throw new Error(
+				`Read-only mode is not supported for ${agent}: native guard support has not been verified`,
+			);
 		// Pause through the owning session API, never rewrite its transcript.
 		if (agent === "gjc") {
 			if (!ctx.operateGoal)
@@ -79,23 +164,7 @@ export default function runtimeBridge(api: API) {
 		try {
 			const ctx = current;
 			const environment: Record<string, string> = {};
-			for (const key of agent === "gjc"
-				? [
-						"GJC_CONFIG_DIR",
-						"GJC_CODING_AGENT_DIR",
-						"XDG_CONFIG_HOME",
-						"XDG_DATA_HOME",
-						"XDG_STATE_HOME",
-						"XDG_CACHE_HOME",
-					]
-				: [
-						"PI_CONFIG_DIR",
-						"PI_CODING_AGENT_DIR",
-						"XDG_CONFIG_HOME",
-						"XDG_DATA_HOME",
-						"XDG_STATE_HOME",
-						"XDG_CACHE_HOME",
-					]) {
+			for (const key of [...environmentKeys[agent], ...xdgKeys]) {
 				if (process.env[key]) environment[key] = process.env[key] as string;
 			}
 			const payload = {
@@ -104,7 +173,12 @@ export default function runtimeBridge(api: API) {
 				cwd: ctx.cwd,
 				session_id: ctx.sessionManager.getSessionId(),
 				session_file: ctx.sessionManager.getSessionFile(),
-				model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+				model:
+					ctx.model &&
+					ctx.model.provider !== "unknown" &&
+					ctx.model.id !== "unknown"
+						? `${ctx.model.provider}/${ctx.model.id}`
+						: undefined,
 				profile: ctx.getActiveModelProfile?.(),
 				thinking: api.getThinkingLevel(),
 				environment,
@@ -121,8 +195,13 @@ export default function runtimeBridge(api: API) {
 				(existsSync(join(root, "fork_from_message.py"))
 					? join(root, "fork_from_message.py")
 					: installed);
+			const helperEnvironment = { ...process.env };
+			if (helperEnvironment.HERDR_PANEL_FORK_STATE_DIR)
+				helperEnvironment.HERDR_PLUGIN_STATE_DIR =
+					helperEnvironment.HERDR_PANEL_FORK_STATE_DIR;
 			await new Promise<void>((resolve, reject) => {
 				const child = spawn("python3", [helper, "--register"], {
+					env: helperEnvironment,
 					stdio: ["pipe", "ignore", "pipe"],
 					timeout: 4000,
 				});

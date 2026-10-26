@@ -53,7 +53,10 @@ class FakeClient:
         if op == ("pane", "process-info"):
             child = args[-1] == "w:p2"
             launched = bool(self.child_argv)
-            proc = {"pid": 200 if child else 100, "name": self.agent, "argv": self.child_argv if child else self.argv}
+            argv = self.child_argv if child else self.argv
+            if child and argv and argv[0] == "env":
+                argv = argv[argv.index(self.agent):]
+            proc = {"pid": 200 if child else 100, "name": self.agent, "argv": argv}
             if child and not launched:
                 proc = {"pid": 2, "name": "zsh", "argv": ["zsh"]}
             return {"process_info": {"shell_pid": 2, "foreground_processes": [proc]}}
@@ -65,6 +68,8 @@ class FakeClient:
             if self.fail_start:
                 raise module.ForkError("agent_not_ready")
             self.child_argv = [self.agent, *args[args.index("--") + 1:]]
+            if self.agent == "claude" and "--session-id" in self.child_argv:
+                self.child_argv[self.child_argv.index("--session-id") + 1] = CHILD
             return {"type": "agent_started"}
         if op == ("pane", "run"):
             self.child_argv = [self.agent, "--tools", "read"]
@@ -159,6 +164,9 @@ class ContractTests(unittest.TestCase):
 
 class WorkflowTests(unittest.TestCase):
     def workflow(self, client, **options):
+        uuid_patch = patch.object(module.uuid, "uuid4", return_value=module.uuid.UUID(CHILD))
+        uuid_patch.start()
+        self.addCleanup(uuid_patch.stop)
         return module.ForkWorkflow(client, {"focused_pane_id": "w:p1", "workspace_id": "w"},
                                    {"HERDR_SOCKET_PATH": "/socket", "HERDR_PLUGIN_STATE_DIR": "/state"}, **options)
 
@@ -255,7 +263,7 @@ class WorkflowTests(unittest.TestCase):
     def test_gjc_uses_shell_launch_not_unsupported_agent_start(self):
         with tempfile.TemporaryDirectory() as cwd:
             client = FakeClient(cwd, "gjc")
-            records = [dict(session_id=SOURCE, bridge_version=1, environment={"XDG_CACHE_HOME": "/owner-cache"}), dict(session_id=SOURCE), dict(session_id=CHILD, read_only_ready=True)]
+            records = [dict(session_id=SOURCE, bridge_version=1, environment={"XDG_CACHE_HOME": "/owner-cache"}), dict(session_id=SOURCE), dict(session_id=CHILD, read_only_ready=True), dict(session_id=SOURCE)]
             with patch.object(module, "read_record", side_effect=records), patch.object(module.ForkWorkflow, "_start_shell", autospec=True) as start:
                 def launch(workflow, pane, argv):
                     client.child_argv = list(argv)

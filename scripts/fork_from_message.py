@@ -15,7 +15,9 @@ import time
 from typing import Any, Mapping, Sequence
 import uuid
 
-from agent_contracts import AGENTS, ENVIRONMENT_KEYS, ContractError, fork_launch, safe_launch_flags
+from agent_contracts import AGENTS, ENVIRONMENT_KEYS, PI_FAMILY, UNAVAILABLE, ContractError, fork_launch, safe_launch_flags
+from harness_identity import entrypoint_argv, select_process, session_id, session_reference
+from native_sessions import NativeSessionError, copilot_fork
 from runtime_registry import PLUGIN_ID, RegistryError, descendant_of, process_start, read_record, state_root, write_record
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,18 +74,11 @@ def foreground(client: HerdrClient, pane_id: str, agent: str | None = None) -> d
     processes = info.get("foreground_processes", [])
     if not isinstance(processes, list):
         raise ForkError("Pane has no foreground process list")
-    candidates = processes
-    if agent:
-        candidates = [item for item in processes if isinstance(item, dict) and
-                      (item.get("name") == agent or (isinstance(item.get("argv"), list) and item["argv"] and Path(item["argv"][0]).name == agent))]
-    if len(candidates) != 1:
-        raise ForkError("Pane must have exactly one matching foreground agent process")
-    process = object_value(candidates[0], "foreground process")
+    product, process = select_process([p for p in processes if isinstance(p, dict)], agent)
     argv = process.get("argv")
     if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
         raise ForkError("Foreground process has no verifiable argv")
-    if agent and Path(argv[0]).name != agent and process.get("name") != agent:
-        raise ForkError("Agent metadata does not match the foreground process")
+    process["product"] = product
     return process
 
 
@@ -112,7 +107,7 @@ class ForkWorkflow:
     def execute(self) -> ForkResult:
         try:
             return self._execute()
-        except (ForkError, ContractError, RegistryError) as exc:
+        except (ForkError, ContractError, RegistryError, NativeSessionError) as exc:
             # A live process or approval dialog may exist. Preserve it, never close on error.
             suffix = f" Destination preserved: {self.target['pane_id']}." if self.target else ""
             raise ForkError(str(exc) + suffix) from exc
@@ -124,19 +119,25 @@ class ForkWorkflow:
         pane = object_value(self.client.json(["pane", "get", source_id]).get("pane"), "source pane")
         if pane.get("pane_id") != source_id or pane.get("workspace_id") != self.context.get("workspace_id"):
             raise ForkError("Source pane/workspace identity changed")
-        agent = pane.get("agent")
+        reported_agent = pane.get("agent")
+        if reported_agent and reported_agent not in AGENTS and reported_agent not in ("antigravity_cli", "antigravity-cli", "cursor-agent"):
+            raise ForkError("Supported agents: " + ", ".join(AGENTS))
+        process = foreground(self.client, source_id, reported_agent)
+        agent = process["product"]
         if agent not in AGENTS:
             raise ForkError("Supported agents: " + ", ".join(AGENTS))
-        process = foreground(self.client, source_id, agent)
+        pane = {**pane, "agent": agent}
+        if agent in UNAVAILABLE:
+            raise ForkError(f"Automatic {AGENTS[agent]} fork unavailable: {UNAVAILABLE[agent]}. Source was not resumed or changed")
+        if pane.get("agent_status") not in ("idle", "done"):
+            raise ForkError("Source must be idle before forking; no input was sent")
         cwd = pane.get("foreground_cwd") or pane.get("cwd")
         if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
             raise ForkError("Source working directory is unavailable")
         owner = None
-        if agent in ("gjc", "omp"):
+        if agent in PI_FAMILY:
             owner = read_record(state_root(self.env), self.env.get("HERDR_SOCKET_PATH", ""), pane, process["pid"])
-            reference = native_id(owner["session_id"])
-            if owner.get("session_file"):
-                reference = owner["session_file"]
+            reference = owner.get("session_file") or native_id(owner["session_id"])
             if self.mode == "read-only" and owner.get("bridge_version") != 1:
                 raise ForkError("Read-only mode requires the runtime guard bridge")
         else:
@@ -150,50 +151,61 @@ class ForkWorkflow:
                 environment.pop(key, None)
             environment.update(owner.get("environment", {}))
         environment["HERDR_PANEL_FORK_STATE_DIR"] = str(state_root(self.env))
-        launch = fork_launch(agent, reference, process["argv"], environment, read_only=self.mode == "read-only",
+        source_session_id = owner["session_id"] if owner else session_id(reference)
+        launch = fork_launch(agent, reference, entrypoint_argv(process), environment, read_only=self.mode == "read-only",
                              bridge=ROOT / "scripts/runtime_bridge.ts", omp_overlay=ROOT / "scripts/read-only-omp.yml",
                              mcp_servers=mcp, runtime=owner)
         expected_child_id = str(uuid.uuid4()) if agent == "claude" else None
         launch_argv = (*launch.argv, "--session-id", expected_child_id) if expected_child_id else launch.argv
+        if agent in ("pi", "omo"):
+            launch_argv = (*launch_argv, "--extension", str(ROOT / "scripts/runtime_bridge.ts"))
         if owner:
             # The new interactive shell has its own startup environment. Remove
             # absent owner roots explicitly before exec, not with empty variables.
-            unset = [part for key in ENVIRONMENT_KEYS[agent] if key not in owner.get("environment", {}) for part in ("-u", key)]
+            unset = ["-u", "HERDR_PLUGIN_STATE_DIR", *[part for key in ENVIRONMENT_KEYS[agent] if key not in owner.get("environment", {}) for part in ("-u", key)]]
             assignments = [f"{key}={value}" for key, value in launch.environment.items()]
             launch_argv = ("env", *unset, *assignments, *launch_argv)
-        source_fingerprint = (pane.get("terminal_id"), process["pid"], reference)
+        source_fingerprint = (pane.get("terminal_id"), process["pid"], process["argv"])
         latest = object_value(self.client.json(["pane", "get", source_id]).get("pane"), "source recheck")
         current_process = foreground(self.client, source_id, agent)
-        if (latest.get("terminal_id"), current_process["pid"]) != source_fingerprint[:2]:
+        if (latest.get("terminal_id"), current_process["pid"], current_process["argv"]) != source_fingerprint:
             raise ForkError("Source process changed during launch preparation")
-        if agent in ("gjc", "omp"):
-            fresh = read_record(state_root(self.env), self.env.get("HERDR_SOCKET_PATH", ""), latest, process["pid"])
+        if owner:
+            fresh = read_record(state_root(self.env), self.env.get("HERDR_SOCKET_PATH", ""), {**latest, "agent": agent}, process["pid"])
             if fresh["session_id"] != owner["session_id"]:
                 raise ForkError("Source session switched before fork")
         elif self._native_reference(latest, agent) != reference:
             raise ForkError("Source session switched before fork")
+        if agent == "copilot":
+            expected_child_id = copilot_fork(shutil.which("copilot") or "copilot", source_session_id, cwd=cwd, environment=environment)
+            launch_argv = (launch_argv[0], "--resume", expected_child_id, *launch_argv[3:])
         target = self._create_target(pane, cwd, launch.environment)
         self.target = target
         self._wait_shell(target["pane_id"])
-        if agent in ("gjc", "omp"):
+        if agent in PI_FAMILY:
             self._start_shell(target["pane_id"], launch_argv)
         else:
             self._start_native(target["pane_id"], agent, launch_argv[1:])
-        fork_id = self._verify_child(target["pane_id"], agent, owner["session_id"] if owner else reference, expected_child_id)
+        fork_id = self._verify_child(target["pane_id"], agent, source_session_id, expected_child_id)
+        parent = object_value(self.client.json(["pane", "get", source_id]).get("pane"), "source postcheck")
+        if owner:
+            after = read_record(state_root(self.env), self.env.get("HERDR_SOCKET_PATH", ""), {**parent, "agent": agent}, process["pid"])
+            unchanged = after["session_id"] == source_session_id
+        else:
+            unchanged = session_id(self._native_reference(parent, agent)) == source_session_id
+        if not unchanged:
+            raise ForkError("Source identity changed during fork; destination preserved for inspection")
         if self.mode == "message":
             self._picker(target["pane_id"], agent)
         self.client.json(["pane", "rename", target["pane_id"], f"Panel Fork (read-only) · {AGENTS[agent]}" if self.mode == "read-only" else f"Panel Fork · {AGENTS[agent]}"])
         if self.focus:
             self.client.json(["agent", "focus", target["pane_id"]])
         return ForkResult("ready" if fork_id else "started_identity_pending", source_id,
-                          owner["session_id"] if owner else reference, target["pane_id"], fork_id,
+                          source_session_id, target["pane_id"], fork_id,
                           self.destination, target["workspace_id"], target["tab_id"], cwd, agent, launch.restrictions)
 
     def _native_reference(self, pane: Mapping[str, Any], agent: str) -> str:
-        session = pane.get("agent_session")
-        if not isinstance(session, dict) or session.get("agent") != agent or session.get("kind") != "id" or session.get("source") != f"herdr:{agent}":
-            raise ForkError(f"No trusted {agent} session reference. Install its Herdr integration and restart it.")
-        return native_id(session.get("value"))
+        return session_reference(pane, agent)
 
     def _codex_mcp(self, argv: list[str]) -> list[tuple[str, str]]:
         try:
@@ -256,13 +268,13 @@ class ForkWorkflow:
             pane = object_value(self.client.json(["pane", "get", pane_id]).get("pane"), "child pane")
             if pane.get("agent_status") == "blocked":
                 raise ForkError("Child requires login, trust, or permission input; no approval was answered")
-            if pane.get("agent") == agent:
+            if pane.get("agent") == agent or (agent == "omo" and pane.get("agent") == "pi"):
                 process = foreground(self.client, pane_id, agent)
                 if self.mode == "read-only" and not ("--tools" in process["argv"] or "--sandbox" in process["argv"]):
                     raise ForkError("Child process argv does not contain read-only restrictions")
-                if agent in ("gjc", "omp"):
+                if agent in PI_FAMILY:
                     try:
-                        record = read_record(state_root(self.env), self.env.get("HERDR_SOCKET_PATH", ""), pane, process["pid"])
+                        record = read_record(state_root(self.env), self.env.get("HERDR_SOCKET_PATH", ""), {**pane, "agent": agent}, process["pid"])
                         child_id = native_id(record["session_id"])
                         if self.mode == "read-only" and not record.get("read_only_ready"):
                             raise ForkError("Child read-only guard not ready")
@@ -271,8 +283,8 @@ class ForkWorkflow:
                         continue
                 else:
                     try:
-                        child_id = self._native_reference(pane, agent)
-                    except ForkError:
+                        child_id = session_id(self._native_reference(pane, agent))
+                    except (ForkError, ContractError):
                         if agent == "claude" and expected_id and pane.get("agent_status") in ("idle", "done") and expected_id in process["argv"]:
                             return expected_id
                         if agent == "codex" and pane.get("agent_status") == "idle":
@@ -281,6 +293,8 @@ class ForkWorkflow:
                         continue
                 if child_id == parent_id:
                     raise ForkError("Child reported the parent session ID instead of an independent fork")
+                if expected_id and child_id != expected_id:
+                    raise ForkError("Child reported a session ID different from the native fork result")
                 if pane.get("agent_status") in ("idle", "done"):
                     return child_id
             time.sleep(POLL_SECONDS)
@@ -297,7 +311,7 @@ def register(client: HerdrClient, env: Mapping[str, str], payload: Mapping[str, 
     pane_id = env.get("HERDR_PANE_ID", "")
     pane = object_value(client.json(["pane", "get", pane_id]).get("pane"), "owner pane")
     kind = payload.get("agent")
-    if kind not in ("gjc", "omp") or pane.get("agent") != kind:
+    if kind not in PI_FAMILY or not (pane.get("agent") == kind or (kind == "omo" and pane.get("agent") == "pi")):
         raise ForkError("Registration agent does not match the pane owner")
     process = foreground(client, pane_id, kind)
     pid = process["pid"]
