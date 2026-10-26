@@ -16,9 +16,9 @@ from typing import Any, Mapping, Sequence
 import uuid
 
 from agent_contracts import AGENTS, ENVIRONMENT_KEYS, PI_FAMILY, UNAVAILABLE, ContractError, fork_launch, safe_launch_flags
-from harness_identity import entrypoint_argv, select_process, session_id, session_reference
+from harness_identity import ForegroundNotReady, candidate_diagnostics, entrypoint_argv, process_product, select_process, session_id, session_reference
 from native_sessions import NativeSessionError, copilot_fork
-from runtime_registry import PLUGIN_ID, RegistryError, descendant_of, process_start, read_record, state_root, write_record
+from runtime_registry import PLUGIN_ID, RegistryError, process_start, read_record, state_root, write_record
 
 ROOT = Path(__file__).resolve().parents[1]
 DESTINATIONS = ("pane", "tab", "workspace")
@@ -71,10 +71,10 @@ def native_id(value: Any) -> str:
 
 def foreground(client: HerdrClient, pane_id: str, agent: str | None = None) -> dict[str, Any]:
     info = object_value(client.json(["pane", "process-info", "--pane", pane_id]).get("process_info"), "process info")
-    processes = info.get("foreground_processes", [])
-    if not isinstance(processes, list):
+    processes = info.get("foreground_processes")
+    if not isinstance(processes, list) or any(not isinstance(p, dict) for p in processes):
         raise ForkError("Pane has no foreground process list")
-    product, process = select_process([p for p in processes if isinstance(p, dict)], agent)
+    product, process = select_process(processes, agent)
     argv = process.get("argv")
     if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
         raise ForkError("Foreground process has no verifiable argv")
@@ -307,19 +307,83 @@ class ForkWorkflow:
             time.sleep(POLL_SECONDS)
 
 
+def registration_ancestor(pid: int, shell_pid: int) -> int | None:
+    if type(shell_pid) is not int or shell_pid <= 1:
+        raise ForkError("Registration has no verified pane shell")
+    deadline = time.monotonic() + 1.0
+    seen: set[int] = set()
+    ancestor = None
+    current = pid
+    while current != shell_pid and current > 1 and current not in seen:
+        seen.add(current)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or len(seen) > 64:
+            break
+        try:
+            result = subprocess.run(["ps", "-p", str(current), "-o", "ppid=,args="],
+                                    capture_output=True, text=True, check=True, timeout=remaining)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ForkError("Registration ancestry is unavailable") from exc
+        try:
+            parent, command = result.stdout.strip().split(None, 1)
+            parent = int(parent)
+            # ps prints display arguments, not shell-escaped syntax. Only the
+            # entrypoint is evidence; quotes in a prompt are not parse errors.
+            argv = command.split(maxsplit=2)
+        except ValueError as exc:
+            raise ForkError("Registration ancestry is unverifiable") from exc
+        if current != pid and process_product({"argv": argv}):
+            ancestor = current
+        current = parent
+    if current != shell_pid:
+        raise ForkError("Registration ancestry does not reach the pane shell")
+    return ancestor
+
+
 def register(client: HerdrClient, env: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
     pane_id = env.get("HERDR_PANE_ID", "")
     pane = object_value(client.json(["pane", "get", pane_id]).get("pane"), "owner pane")
+    if not pane_id or pane.get("pane_id") != pane_id or not isinstance(pane.get("terminal_id"), str) or not pane["terminal_id"]:
+        raise ForkError("Registration pane/terminal identity is unavailable or changed")
     kind = payload.get("agent")
-    if kind not in PI_FAMILY or not (pane.get("agent") == kind or (kind == "omo" and pane.get("agent") == "pi")):
-        raise ForkError("Registration agent does not match the pane owner")
-    process = foreground(client, pane_id, kind)
-    pid = process["pid"]
-    if payload.get("pid") != pid or not descendant_of(os.getpid(), pid):
-        raise ForkError("Registration must originate inside the exact foreground owner process")
+    if kind not in PI_FAMILY:
+        raise ForkError("Registration requires a verified Pi-family agent")
+    requested_pid = payload.get("pid")
+    if type(requested_pid) is not int or not 1 < requested_pid <= 2147483647:
+        raise ForkError("Registration requires a valid owner PID")
     session = native_id(payload.get("session_id"))
-    cwd = str(Path(payload.get("cwd", "")).resolve())
-    if cwd != str(Path(pane.get("foreground_cwd") or pane.get("cwd", "")).resolve()):
+    # Registration is sent directly by the extension, not an arbitrary descendant.
+    if os.getppid() != requested_pid:
+        raise ForkError("Registration must originate inside the exact foreground owner process")
+    info = object_value(client.json(["pane", "process-info", "--pane", pane_id]).get("process_info"), "process info")
+    processes = info.get("foreground_processes")
+    if not isinstance(processes, list) or any(not isinstance(item, dict) for item in processes):
+        raise ForkError("Pane has no foreground process list")
+    candidates = [item for item in processes if process_product(item)]
+    ancestor = registration_ancestor(requested_pid, info.get("shell_pid"))
+    if ancestor is not None:
+        return {"status": "ignored", "reason": "nested_non_owner", "diagnostics": candidate_diagnostics(candidates)}
+    try:
+        _, process = select_process(processes, kind)
+    except ForegroundNotReady:
+        process = None
+    diagnostics = candidate_diagnostics([process] if process else [])
+    pane_agent = pane.get("agent")
+    matches_pane = pane_agent == kind or (kind == "omo" and pane_agent == "pi")
+    if not matches_pane and pane_agent not in (None, ""):
+        raise ForkError("Registration agent does not match the pane owner")
+    if process is not None:
+        pid = process.get("pid")
+        if type(pid) is not int or not 1 < pid <= 2147483647:
+            raise ForkError(f"Foreground owner has no verifiable PID ({diagnostics})")
+        if requested_pid != pid:
+            raise ForkError(f"Registration must originate inside the exact foreground owner process ({diagnostics})")
+    requested_cwd = payload.get("cwd")
+    pane_cwd = pane.get("foreground_cwd") or pane.get("cwd")
+    if not isinstance(requested_cwd, str) or not Path(requested_cwd).is_absolute() or not isinstance(pane_cwd, str) or not Path(pane_cwd).is_absolute():
+        raise ForkError("Registration requires absolute owner and pane working directories")
+    cwd = str(Path(requested_cwd).resolve())
+    if cwd != str(Path(pane_cwd).resolve()):
         raise ForkError("Registration cwd does not match owner cwd")
     safe = {key: payload[key] for key in ("model", "profile", "thinking", "session_file", "bridge_version", "read_only_ready", "registration_valid") if key in payload}
     environment = payload.get("environment", {})
@@ -331,6 +395,15 @@ def register(client: HerdrClient, env: Mapping[str, str], payload: Mapping[str, 
         raise ForkError("Owner registration transcript must be an absolute path")
     if isinstance(session_file, str) and not Path(session_file).is_file():
         safe.pop("session_file")
+    if process is None:
+        return {"status": "not_ready", "reason": "foreground_not_visible", "diagnostics": diagnostics}
+    if not matches_pane:
+        return {"status": "not_ready", "reason": "pane_owner_not_visible", "diagnostics": diagnostics}
+    after_pane = object_value(client.json(["pane", "get", pane_id]).get("pane"), "owner pane")
+    after_process = foreground(client, pane_id, kind)
+    if (any(after_pane.get(key) != pane.get(key) for key in ("pane_id", "terminal_id", "agent", "cwd", "foreground_cwd"))
+            or any(after_process.get(key) != process.get(key) for key in ("pid", "argv", "cwd"))):
+        raise ForkError("Registration owner changed before publication")
     safe.update(agent=kind, pane_id=pane_id, terminal_id=pane["terminal_id"], pid=pid,
                 process_start=process_start(pid), session_id=session, cwd=cwd)
     path = write_record(state_root(env), env.get("HERDR_SOCKET_PATH", ""), safe)
