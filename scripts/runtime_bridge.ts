@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 
 type Context = {
 	cwd: string;
+	sessionMetadata?: { kind: "main" | "sub"; taskDepth: number };
 	model?: { provider: string; id: string };
 	sessionManager: {
+		getCwd?(): string;
 		getSessionId(): string;
 		getSessionFile(): string | undefined;
 	};
@@ -142,6 +144,13 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 		return;
 	}
 	const readOnly = process.env.HERDR_PANEL_FORK_READ_ONLY === "1";
+	const on: API["on"] = (name, handler) => {
+		api.on(name, (event, ctx) => {
+			// In-process GJC tasks share the owner's PID and inherited pane variables.
+			if (agent === "gjc" && ctx.sessionMetadata?.kind !== "main") return;
+			return handler(event, ctx);
+		});
+	};
 	let current: Context | undefined;
 	let busy = false;
 	let ready = !readOnly;
@@ -164,8 +173,15 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 		return JSON.stringify([
 			ctx.sessionManager.getSessionId(),
 			ctx.sessionManager.getSessionFile() ?? null,
-			ctx.cwd,
+			sessionCwd(ctx),
 		]);
+	}
+
+	function sessionCwd(ctx: Context): string {
+		if (agent !== "gjc") return ctx.cwd;
+		if (!ctx.sessionManager.getCwd)
+			throw new Error("GJC runtime does not expose its current session cwd");
+		return ctx.sessionManager.getCwd();
 	}
 
 	async function guard(ctx: Context) {
@@ -203,7 +219,7 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 			const payload = {
 				agent,
 				pid: process.pid,
-				cwd: ctx.cwd,
+				cwd: sessionCwd(ctx),
 				session_id: ctx.sessionManager.getSessionId(),
 				session_file: ctx.sessionManager.getSessionFile(),
 				model:
@@ -353,14 +369,14 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 			timer.unref();
 		}
 	};
-	api.on("session_start", update);
-	api.on("agent_end", update);
+	on("session_start", update);
+	on("agent_end", update);
 	for (const event of [
 		"session_before_switch",
 		"session_before_branch",
 		"session_before_tree",
 	]) {
-		api.on(event, async (_value, ctx) => {
+		on(event, async (_value, ctx) => {
 			if (readOnly) return { cancel: true };
 			if (
 				agent !== "gjc" ||
@@ -375,7 +391,7 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 		});
 	}
 	for (const event of ["session_switch", "session_branch", "session_tree"])
-		api.on(event, async (value, ctx) => {
+		on(event, async (value, ctx) => {
 			if (agent === "gjc") {
 				// GJC 0.19 may retain the startup manager in extension contexts after a
 				// cold-sidecar transition. Refuse stale identity rather than re-publish it.
@@ -391,13 +407,13 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 			}
 			await update(value, ctx);
 		});
-	api.on("session_shutdown", () => {
+	on("session_shutdown", () => {
 		stopped = true;
 		transitionIdentity = undefined;
 		if (timer) clearInterval(timer);
 		current = undefined;
 	});
-	api.on("before_agent_start", async (event, ctx) => {
+	on("before_agent_start", async (event, ctx) => {
 		// A cancelled transition has no switch event. Only the unchanged native
 		// conversation may recover, and only after a confirmed tombstone.
 		if (
