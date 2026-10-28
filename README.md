@@ -107,6 +107,13 @@ A helper launched directly by a nested runtime proves its foreground ancestor
 and skips registration without changing the parent's record. Inherited owner
 markers alone never grant or deny ownership.
 
+GJC also runs task sessions inside the foreground process. The bridge accepts
+only native `sessionMetadata.kind: "main"` events; child and unclassified sessions
+cannot publish, invalidate, or stop the parent registration. It reads the current
+cwd through `sessionManager.getCwd()` rather than the launch-time context, so
+worktree relocation does not leave the owner record on the previous directory.
+Other Pi-family runtimes keep their own context and process-ownership checks.
+
 For a single new Pi/OMO process, add `--extension <absolute-bridge-path>` to its
 normal launch command. No global configuration change is required for that process:
 

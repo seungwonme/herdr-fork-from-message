@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +12,9 @@ type Handler = Parameters<BridgeAPI["on"]>[1];
 type Context = Parameters<Handler>[1];
 const context = (): Context => ({
 	cwd: "/fixture",
+	sessionMetadata: { kind: "main", taskDepth: 0 },
 	sessionManager: {
+		getCwd: () => "/fixture",
 		getSessionId: () => "fixture",
 		getSessionFile: () => undefined,
 	},
@@ -49,6 +51,7 @@ function registrationFixture(agent: string, readOnly = false) {
 		...context(),
 		model: { provider: "fixture-provider", id: "live-model" },
 		sessionManager: {
+			getCwd: () => "/fixture",
 			getSessionId: () => "child-session",
 			getSessionFile: () => "/fixture/sessions/child-session.jsonl",
 		},
@@ -109,6 +112,165 @@ describe("registration readiness", () => {
 		shutdowns.push(() => handlers.get("session_shutdown")?.({}, ctx));
 		return { handlers, warnings, ctx };
 	}
+
+	test("in-process GJC children cannot replace or invalidate the parent record", async () => {
+		for (const metadata of [
+			{ kind: "sub" as const, taskDepth: 1 },
+			undefined,
+		]) {
+			const payloads: Record<string, unknown>[] = [];
+			const f = fixture(async (payload) => {
+				payloads.push(payload);
+				return { status: "registered" };
+			});
+			await f.handlers.get("session_start")?.({}, f.ctx);
+			const child: Context = {
+				...f.ctx,
+				sessionMetadata: metadata,
+				sessionManager: {
+					getCwd: () => "/fixture",
+					getSessionId: () => "task-child",
+					getSessionFile: () => "/fixture/parent/task-child.jsonl",
+				},
+			};
+			for (const event of [
+				"session_start",
+				"agent_end",
+				"before_agent_start",
+				"session_before_switch",
+				"session_before_branch",
+				"session_before_tree",
+				"session_switch",
+				"session_branch",
+				"session_tree",
+				"session_shutdown",
+			])
+				expect(await f.handlers.get(event)?.({}, child)).toBeUndefined();
+			await f.handlers.get("agent_end")?.({}, f.ctx);
+			expect(payloads.map((item) => item.session_id)).toEqual([
+				"fixture",
+				"fixture",
+			]);
+			expect(payloads.every((item) => item.registration_valid === true)).toBe(
+				true,
+			);
+			expect(f.warnings).toEqual([]);
+		}
+	});
+
+	test("reads the current GJC manager cwd rather than the launch context", async () => {
+		const payloads: Record<string, unknown>[] = [];
+		const f = fixture(async (payload) => {
+			payloads.push(payload);
+			return { status: "registered" };
+		});
+		let cwd = "/fixture";
+		f.ctx.sessionManager.getCwd = () => cwd;
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		cwd = "/fixture/worktree";
+		await f.handlers.get("agent_end")?.({}, f.ctx);
+		expect(f.ctx.cwd).toBe("/fixture");
+		expect(payloads.map((item) => item.cwd)).toEqual([
+			"/fixture",
+			"/fixture/worktree",
+		]);
+	});
+
+	test("GJC without its current cwd API fails before any registration", async () => {
+		let calls = 0;
+		const f = fixture(async () => {
+			calls++;
+			return { status: "registered" };
+		});
+		delete f.ctx.sessionManager.getCwd;
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		expect(calls).toBe(0);
+		expect(f.warnings).toHaveLength(1);
+		expect(f.warnings[0]).toContain("current session cwd");
+	});
+
+	test("a live cwd change cannot rearm a cancelled GJC transition", async () => {
+		const payloads: Record<string, unknown>[] = [];
+		const f = fixture(async (payload) => {
+			payloads.push(payload);
+			return { status: "registered" };
+		});
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		await f.handlers.get("session_before_switch")?.({}, f.ctx);
+		f.ctx.sessionManager.getCwd = () => "/fixture/other";
+		await f.handlers.get("before_agent_start")?.({}, f.ctx);
+		expect(payloads.map((item) => item.registration_valid)).toEqual([
+			true,
+			false,
+		]);
+	});
+
+	test("child startup creates no heartbeat and the main heartbeat reads a moved cwd", async () => {
+		const timer = setInterval(() => {}, 60_000);
+		timer.unref();
+		const timers = spyOn(globalThis, "setInterval").mockReturnValue(timer);
+		try {
+			const payloads: Record<string, unknown>[] = [];
+			const f = fixture(async (payload) => {
+				payloads.push(payload);
+				return { status: "registered" };
+			});
+			await f.handlers.get("session_start")?.(
+				{},
+				{
+					...f.ctx,
+					sessionMetadata: { kind: "sub", taskDepth: 1 },
+				},
+			);
+			expect(timers).not.toHaveBeenCalled();
+			expect(payloads).toEqual([]);
+			await f.handlers.get("session_start")?.({}, f.ctx);
+			expect(timers).toHaveBeenCalledTimes(1);
+			f.ctx.sessionManager.getCwd = () => "/fixture/moved";
+			const heartbeat = timers.mock.calls[0]?.[0];
+			expect(typeof heartbeat).toBe("function");
+			if (typeof heartbeat === "function") heartbeat();
+			await Promise.resolve();
+			expect(payloads.map((item) => item.cwd)).toEqual([
+				"/fixture",
+				"/fixture/moved",
+			]);
+		} finally {
+			timers.mockRestore();
+			clearInterval(timer);
+		}
+	});
+
+	test("a GJC child cannot register but still obeys inherited read-only tool guards", async () => {
+		const f = registrationFixture("gjc", true);
+		f.ctx.sessionMetadata = { kind: "sub", taskDepth: 1 };
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		expect(
+			await f.handlers.get("before_agent_start")?.(
+				{ systemPrompt: "child" },
+				f.ctx,
+			),
+		).toBeUndefined();
+		expect(
+			await f.handlers.get("session_before_switch")?.({}, f.ctx),
+		).toBeUndefined();
+		expect(
+			await f.handlers.get("tool_call")?.({ toolName: "bash" }, f.ctx),
+		).toMatchObject({ block: true });
+		expect(f.tools).toEqual([]);
+		expect(f.pauses).toEqual([]);
+	});
+
+	test("other Pi-family runtimes do not require GJC metadata or cwd APIs", async () => {
+		for (const agent of ["omp", "pi", "omo"]) {
+			const f = registrationFixture(agent);
+			delete f.ctx.sessionMetadata;
+			delete f.ctx.sessionManager.getCwd;
+			f.ctx.cwd = `/fixture/${agent}`;
+			await f.handlers.get("session_start")?.({}, f.ctx);
+			expect(f.payload().cwd).toBe(`/fixture/${agent}`);
+		}
+	});
 
 	test("not-ready startup followed by success does not warn", async () => {
 		let count = 0;
