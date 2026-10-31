@@ -60,6 +60,19 @@ class HerdrClient:
             raise ForkError("Herdr session list failed") from exc
 
 
+def _without_flags(arguments: list[str], names: set[str]) -> list[str]:
+    kept: list[str] = []
+    skip = False
+    for argument in arguments:
+        if skip:
+            skip = False
+        elif argument in names:
+            skip = True
+        else:
+            kept.append(argument)
+    return kept
+
+
 def object_value(value: Any, name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ForkError(f"Missing {name}")
@@ -191,7 +204,7 @@ class ForkWorkflow:
         # A wrapper that registered `<launcher> --resume <id>` for restart recovery
         # (for example a proxy launcher) also starts the fork.
         launcher = None
-        if agent == "claude":
+        if agent in ("claude", "codex"):
             launcher = registered_launcher(self.client.sessions, self.env.get("HERDR_SOCKET_PATH", ""),
                                            source_id, agent, source_session_id)
         target = self._create_target(pane, cwd, launch.environment)
@@ -200,7 +213,11 @@ class ForkWorkflow:
         if agent in PI_FAMILY:
             self._start_shell(target["pane_id"], launch_argv)
         elif launcher:
-            self._start_shell(target["pane_id"], (launcher, *launch_argv[1:]))
+            arguments = list(launch_argv[1:])
+            if agent == "codex":
+                # The wrapper selects its own profile; a second --profile would conflict.
+                arguments = _without_flags(arguments, {"--profile", "-p"})
+            self._start_shell(target["pane_id"], (launcher, *arguments))
         else:
             self._start_native(target["pane_id"], agent, launch_argv[1:])
         fork_id = self._verify_child(target["pane_id"], agent, source_session_id, expected_child_id)

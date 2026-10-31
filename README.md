@@ -156,12 +156,14 @@ opencode mini --session ID --fork
 copilot --resume NEW_ID
 ```
 
-Claude wrapper launchers: when the source pane's `custom:claude` reporter saved
-`LAUNCHER --resume ID` as its Herdr restart command (for example a proxy launcher
-that keeps Claude as a child and reports the pane), the fork starts with
-`LAUNCHER --resume ID --fork-session --session-id NEW_ID` through a shell launch.
-Only an exact binding for the current session ID with a plain command name is used;
-anything else keeps the native `claude` start.
+Wrapper launchers: when the source pane's `custom:claude` or `custom:codex`
+reporter saved `LAUNCHER --resume ID` (Claude) or `LAUNCHER resume ID` (Codex) as
+its Herdr restart command (for example a proxy launcher that keeps the agent as a
+child and reports the pane), the fork starts with that launcher through a shell
+launch: `LAUNCHER --resume ID --fork-session --session-id NEW_ID` for Claude and
+`LAUNCHER fork ID` for Codex, without a relayed `--profile` because the wrapper owns
+its profile. Only an exact binding for the current session ID with a plain command
+name is used; anything else keeps the native agent start.
 
 Allowlisted launch settings and live bridge values are relayed, not secret
 arguments, inherited prompts or permission-bypass flags. OpenCode `--standalone`
