@@ -5,6 +5,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Start Claude forks with the wrapper launcher a pane registered for Herdr restart recovery (`custom:claude` resume `LAUNCHER --resume ID`), so proxy launchers fork through the same launcher.
+
 ## [0.6.0] - 2026-10-25
 
 - Add Pi and OMO native forks with owner-bound live settings, original product identity and child bridge registration.

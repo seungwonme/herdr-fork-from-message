@@ -156,6 +156,13 @@ opencode mini --session ID --fork
 copilot --resume NEW_ID
 ```
 
+Claude wrapper launchers: when the source pane's `custom:claude` reporter saved
+`LAUNCHER --resume ID` as its Herdr restart command (for example a proxy launcher
+that keeps Claude as a child and reports the pane), the fork starts with
+`LAUNCHER --resume ID --fork-session --session-id NEW_ID` through a shell launch.
+Only an exact binding for the current session ID with a plain command name is used;
+anything else keeps the native `claude` start.
+
 Allowlisted launch settings and live bridge values are relayed, not secret
 arguments, inherited prompts or permission-bypass flags. OpenCode `--standalone`
 is retained. Pi-family shell launches use owner-only temporary POSIX scripts with

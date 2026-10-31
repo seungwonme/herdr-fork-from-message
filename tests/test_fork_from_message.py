@@ -5,6 +5,7 @@ import io
 import os
 from pathlib import Path
 import re
+import shlex
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,16 @@ class FakeClient:
         self.source_reads = 0
         self.argv = [agent, "--model", "chosen-model"]
         self.child_argv = []
+        self.store = None  # saved Herdr session.json content, or None when absent
+        self.shell_runs = []
+
+    def sessions(self):
+        if self.store is None:
+            return []
+        path = Path(self.cwd) / "herdr-session" / "session.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(self.store))
+        return [{"session_dir": str(path.parent), "socket_path": "/socket"}]
 
     def pane(self, child=False):
         sid = SOURCE if not child or self.same_id else CHILD
@@ -72,7 +83,18 @@ class FakeClient:
                 self.child_argv[self.child_argv.index("--session-id") + 1] = CHILD
             return {"type": "agent_started"}
         if op == ("pane", "run"):
-            self.child_argv = [self.agent, "--tools", "read"]
+            script = Path(args[-1])
+            launcher = script.read_text().splitlines()[-1] if script.exists() else ""
+            script.unlink(missing_ok=True)
+            self.shell_runs.append(launcher)
+            if self.agent == "claude":
+                words = shlex.split(launcher)
+                # The wrapper execs the native agent with the same fork arguments.
+                self.child_argv = ["claude", *words[1:]]
+                if "--session-id" in self.child_argv:
+                    self.child_argv[self.child_argv.index("--session-id") + 1] = CHILD
+            else:
+                self.child_argv = [self.agent, "--tools", "read"]
             return {}
         if op in (("pane", "rename"), ("agent", "focus"), ("agent", "send-keys")):
             return {}
@@ -184,6 +206,52 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn(("pane", "rename", "w:p2", "Panel Fork · Claude Code"), client.calls)
         self.assertFalse(any(call[:2] == ("agent", "send-keys") for call in client.calls))
         self.assertFalse(any(call[1:2] == ("close",) for call in client.calls))
+
+    def saved_store(self, argv, source="custom:claude", agent="claude", pane_number=2, workspace="w"):
+        # Herdr public pane w:p1 is public number 1; the internal key is opaque.
+        return {"version": 3, "workspaces": [{"id": workspace, "public_pane_numbers": {"7": pane_number},
+                "tabs": [{"panes": {"7": {"agent_resume": {"source": source, "agent": agent, "argv": argv}}}}]}]}
+
+    def test_registered_wrapper_launcher_starts_the_fork(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd)
+            client.store = self.saved_store(["claude-proxy", "--resume", SOURCE], pane_number=1)
+            result = self.workflow(client).execute()
+        self.assertEqual(result.fork_session_id, CHILD)
+        (launcher,) = client.shell_runs
+        words = shlex.split(launcher)
+        self.assertEqual(words[:4], ["claude-proxy", "--resume", SOURCE, "--fork-session"])
+        self.assertIn("--session-id", words)
+        self.assertFalse(any(call[:2] == ("agent", "start") for call in client.calls))
+
+    def test_plain_or_unusable_bindings_keep_the_native_agent_start(self):
+        cases = {
+            "no store": None,
+            "native agent": self.saved_store(["claude", "--resume", SOURCE], pane_number=1),
+            "stale session": self.saved_store(["claude-proxy", "--resume", CHILD], pane_number=1),
+            "other pane": self.saved_store(["claude-proxy", "--resume", SOURCE], pane_number=2),
+            "foreign reporter": self.saved_store(["claude-proxy", "--resume", SOURCE], source="custom:gjc", pane_number=1),
+            "extra arguments": self.saved_store(["claude-proxy", "--resume", SOURCE, "--model", "x"], pane_number=1),
+            "path launcher": self.saved_store(["/tmp/evil", "--resume", SOURCE], pane_number=1),
+            "shell syntax": self.saved_store(["a;b", "--resume", SOURCE], pane_number=1),
+            "unknown schema": {"version": 99},
+        }
+        for name, store in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as cwd:
+                client = FakeClient(cwd)
+                client.store = store
+                result = self.workflow(client).execute()
+                self.assertEqual(result.fork_session_id, CHILD)
+                self.assertEqual(client.shell_runs, [])
+                self.assertTrue(any(call[:2] == ("agent", "start") for call in client.calls))
+
+    def test_unreadable_session_list_keeps_the_native_agent_start(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd)
+            client.sessions = lambda: (_ for _ in ()).throw(module.ForkError("down"))
+            result = self.workflow(client).execute()
+        self.assertEqual(result.fork_session_id, CHILD)
+        self.assertEqual(client.shell_runs, [])
 
     def test_read_only_requires_explicit_mode(self):
         with tempfile.TemporaryDirectory() as cwd:

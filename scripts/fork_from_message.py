@@ -19,6 +19,7 @@ from agent_contracts import AGENTS, ENVIRONMENT_KEYS, PI_FAMILY, UNAVAILABLE, Co
 from harness_identity import ForegroundNotReady, candidate_diagnostics, entrypoint_argv, process_product, select_process, session_id, session_reference
 from native_sessions import NativeSessionError, copilot_fork
 from runtime_registry import PLUGIN_ID, RegistryError, process_start, read_record, state_root, write_record
+from saved_launcher import registered_launcher
 
 ROOT = Path(__file__).resolve().parents[1]
 DESTINATIONS = ("pane", "tab", "workspace")
@@ -49,6 +50,14 @@ class HerdrClient:
         if not isinstance(result, dict):
             raise ForkError(f"Herdr rejected {' '.join(args[:2])}: {value.get('error', 'no result')}")
         return result
+
+    def sessions(self) -> Any:
+        """Herdr's own session list, which reports each session's directory and socket."""
+        try:
+            p = subprocess.run([*self.prefix, "session", "list", "--json"], capture_output=True, text=True, check=True, timeout=15)
+            return json.loads(p.stdout).get("sessions")
+        except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as exc:
+            raise ForkError("Herdr session list failed") from exc
 
 
 def object_value(value: Any, name: str) -> dict[str, Any]:
@@ -179,11 +188,19 @@ class ForkWorkflow:
         if agent == "copilot":
             expected_child_id = copilot_fork(shutil.which("copilot") or "copilot", source_session_id, cwd=cwd, environment=environment)
             launch_argv = (launch_argv[0], "--resume", expected_child_id, *launch_argv[3:])
+        # A wrapper that registered `<launcher> --resume <id>` for restart recovery
+        # (for example a proxy launcher) also starts the fork.
+        launcher = None
+        if agent == "claude":
+            launcher = registered_launcher(self.client.sessions, self.env.get("HERDR_SOCKET_PATH", ""),
+                                           source_id, agent, source_session_id)
         target = self._create_target(pane, cwd, launch.environment)
         self.target = target
         self._wait_shell(target["pane_id"])
         if agent in PI_FAMILY:
             self._start_shell(target["pane_id"], launch_argv)
+        elif launcher:
+            self._start_shell(target["pane_id"], (launcher, *launch_argv[1:]))
         else:
             self._start_native(target["pane_id"], agent, launch_argv[1:])
         fork_id = self._verify_child(target["pane_id"], agent, source_session_id, expected_child_id)
