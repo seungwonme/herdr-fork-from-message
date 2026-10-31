@@ -7,6 +7,7 @@ project follows [Semantic Versioning](https://semver.org/).
 
 - Start Claude forks with the wrapper launcher a pane registered for Herdr restart recovery (`custom:claude` resume `LAUNCHER --resume ID`), so proxy launchers fork through the same launcher.
 - Do the same for Codex (`custom:codex` resume `LAUNCHER resume ID` -> `LAUNCHER fork ID`), dropping the relayed `--profile` the wrapper already sets.
+- Document the wrapper launcher contract (pane TTY, registration shape, session reference, state and release, Herdr-state and `--profile` trade-offs).
 
 ## [0.6.0] - 2026-10-25
 
