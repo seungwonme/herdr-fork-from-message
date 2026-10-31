@@ -156,12 +156,66 @@ opencode mini --session ID --fork
 copilot --resume NEW_ID
 ```
 
-Claude wrapper launchers: when the source pane's `custom:claude` reporter saved
-`LAUNCHER --resume ID` as its Herdr restart command (for example a proxy launcher
-that keeps Claude as a child and reports the pane), the fork starts with
-`LAUNCHER --resume ID --fork-session --session-id NEW_ID` through a shell launch.
-Only an exact binding for the current session ID with a plain command name is used;
-anything else keeps the native `claude` start.
+Wrapper launchers: when the source pane's `custom:claude` or `custom:codex`
+reporter saved `LAUNCHER --resume ID` (Claude) or `LAUNCHER resume ID` (Codex) as
+its Herdr restart command, the fork starts with that launcher through a shell
+launch: `LAUNCHER --resume ID --fork-session --session-id NEW_ID` for Claude and
+`LAUNCHER fork ID` for Codex. Only an exact binding for the current session ID with
+a plain command name is used; anything else keeps the native agent start. The
+contract a wrapper must meet is in the next section.
+
+### Wrapper launcher contract
+
+Any command that starts Claude or Codex on a user's behalf (a proxy or gateway
+launcher, an `ssh host codex` wrapper, a container entrypoint) can make Herdr
+restart recovery and Panel Fork reopen its panes through the same command. Panel
+Fork relies only on Herdr's public custom-integration API plus Herdr's saved
+state; it does not know any particular wrapper. The wrapper has to:
+
+1. **Run the agent on the pane's TTY.** Herdr recognises the pane's agent through
+   the process on the pane terminal. An agent moved to another TTY, for example
+   under `script(1)`, is invisible to Herdr, and once the agent's own Herdr hook
+   reports a `herdr:<agent>` session the wrapper's `custom:<agent>` reports stop
+   being honoured (`resume_not_accepted`). Credential injection that pipes the
+   agent's stdout must therefore be avoided or done without re-terminalling.
+2. **Register the resume command in the agent CLI's own shape, from the pane.**
+   With `HERDR_ENV=1`, `HERDR_SOCKET_PATH` and `HERDR_PANE_ID` set (Herdr sets them
+   in every pane shell):
+
+   ```sh
+   herdr pane report-agent --source custom:claude --agent claude --state idle \
+     --seq "$(date +%s%N)" "$HERDR_PANE_ID" -- LAUNCHER --resume SESSION_ID
+   herdr pane report-agent --source custom:codex --agent codex --state idle \
+     --seq "$(date +%s%N)" "$HERDR_PANE_ID" -- LAUNCHER resume THREAD_ID
+   ```
+
+   `LAUNCHER` is a plain command name on `PATH` (letters, digits, `.`, `_`, `-`),
+   not the agent's own name, and it must pass extra arguments through to the agent
+   so that `LAUNCHER --resume ID --fork-session --session-id NEW_ID` and
+   `LAUNCHER fork ID` work. Re-register whenever the session ID changes (Claude
+   `/clear`, a new Codex thread).
+3. **Report the agent's session reference too**, with
+   `herdr pane report-agent-session --source herdr:<agent> --agent <agent> --seq N
+   --agent-session-id ID PANE`, unless the agent's own Herdr hook already does.
+   Panel Fork reads the source session from that reference.
+4. **Keep reporting state, then release.** Once a custom reporter holds a pane,
+   Herdr shows only the state that reporter sends (`idle`, `working`, `blocked`,
+   `unknown`), so mirror the agent's lifecycle, and release when the agent exits
+   so the pane returns to Herdr's own detection:
+
+   ```sh
+   herdr pane release-agent "$HERDR_PANE_ID" --source custom:codex --agent codex --seq "$(date +%s%N)"
+   ```
+
+   Herdr 0.9.5 accepts `release-agent` options only after the pane ID; options
+   first fail with `unknown option` and the pane stays claimed.
+
+Known trade-offs: Herdr's API does not expose the saved resume command, so Panel
+Fork reads the owning session's `session.json` (format version 3) found through
+`herdr session list --json`; another format version disables wrapper forks and
+keeps the native start. For Codex the relayed `--profile`/`-p` is dropped because a
+registered wrapper is assumed to select its own profile; a wrapper that wants the
+pane's profile relayed must read it from its own configuration.
 
 Allowlisted launch settings and live bridge values are relayed, not secret
 arguments, inherited prompts or permission-bypass flags. OpenCode `--standalone`

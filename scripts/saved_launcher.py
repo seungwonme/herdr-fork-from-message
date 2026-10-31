@@ -5,8 +5,8 @@ pane's resume command through Herdr's custom-integration API. Herdr restart
 recovery then reopens the pane with that launcher. Panel Fork reads the same
 saved binding so a fork starts with the same launcher instead of the bare agent.
 
-Only an exact `[launcher, "--resume", <current session id>]` binding from the
-pane's `custom:<agent>` reporter is accepted, so a stale or foreign binding never
+Only an exact `[launcher, <agent's resume verb>, <current session id>]` binding
+from the pane's `custom:<agent>` reporter is accepted, so a stale or foreign binding never
 selects a command. Anything else falls back to the native agent command.
 """
 from __future__ import annotations
@@ -18,6 +18,8 @@ import re
 from typing import Any, Callable, Mapping
 
 PLAIN_COMMAND = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+# How each agent's own CLI spells "reopen this session"; a wrapper's binding must match it.
+RESUME_SHAPES = {"claude": ("--resume",), "codex": ("resume",)}
 PUBLIC_ALPHABET = "123456789ABCDEFGHJKMNPQRSTVWXYZ0"
 
 
@@ -66,7 +68,8 @@ def launcher_from_binding(entry: Mapping[str, Any] | None, agent: str, session: 
     if not isinstance(binding, dict) or binding.get("source") != f"custom:{agent}" or binding.get("agent") != agent:
         return None
     argv = binding.get("argv")
-    if not isinstance(argv, list) or len(argv) != 3 or argv[1:] != ["--resume", session]:
+    shape = RESUME_SHAPES.get(agent)
+    if shape is None or not isinstance(argv, list) or argv[1:] != [*shape, session]:
         return None
     launcher = argv[0]
     if not isinstance(launcher, str) or not PLAIN_COMMAND.fullmatch(launcher) or launcher == agent:

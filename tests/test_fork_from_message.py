@@ -87,10 +87,10 @@ class FakeClient:
             launcher = script.read_text().splitlines()[-1] if script.exists() else ""
             script.unlink(missing_ok=True)
             self.shell_runs.append(launcher)
-            if self.agent == "claude":
+            if self.agent in ("claude", "codex"):
                 words = shlex.split(launcher)
-                # The wrapper execs the native agent with the same fork arguments.
-                self.child_argv = ["claude", *words[1:]]
+                # The wrapper runs the native agent with the same fork arguments.
+                self.child_argv = [self.agent, *words[1:]]
                 if "--session-id" in self.child_argv:
                     self.child_argv[self.child_argv.index("--session-id") + 1] = CHILD
             else:
@@ -223,6 +223,27 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(words[:4], ["claude-proxy", "--resume", SOURCE, "--fork-session"])
         self.assertIn("--session-id", words)
         self.assertFalse(any(call[:2] == ("agent", "start") for call in client.calls))
+
+    def test_registered_codex_wrapper_forks_without_a_second_profile_flag(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd, "codex")
+            client.argv = ["codex", "--profile", "company-proxy", "-c", "model_catalog_json=\"/tmp/x.json\""]
+            client.store = self.saved_store(["codex-proxy", "resume", SOURCE], source="custom:codex", agent="codex", pane_number=1)
+            result = self.workflow(client).execute()
+        self.assertEqual(result.fork_session_id, CHILD)
+        (launcher,) = client.shell_runs
+        self.assertEqual(shlex.split(launcher), ["codex-proxy", "fork", SOURCE])
+        self.assertFalse(any(call[:2] == ("agent", "start") for call in client.calls))
+
+    def test_codex_binding_must_use_the_codex_resume_verb(self):
+        for argv in (["codex-proxy", "--resume", SOURCE], ["codex-proxy", "resume", CHILD], ["codex", "resume", SOURCE]):
+            with self.subTest(argv=argv), tempfile.TemporaryDirectory() as cwd:
+                client = FakeClient(cwd, "codex")
+                client.store = self.saved_store(argv, source="custom:codex", agent="codex", pane_number=1)
+                result = self.workflow(client).execute()
+                self.assertEqual(result.fork_session_id, CHILD)
+                self.assertEqual(client.shell_runs, [])
+                self.assertTrue(any(call[:2] == ("agent", "start") for call in client.calls))
 
     def test_plain_or_unusable_bindings_keep_the_native_agent_start(self):
         cases = {
