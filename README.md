@@ -2,6 +2,8 @@
 
 Personal fork of [dmangla3/herdr-fork-from-message](https://github.com/dmangla3/herdr-fork-from-message), MIT.
 One Herdr action opens an independent copy using the agent's native fork operation.
+When a plain Codex pane has no reported session ID, it opens the
+native conversation picker in the new panel instead. Choose the source there to fork.
 Claude Code, Codex, OMP, GJC, Pi and OMO have native launch paths. OpenCode and
 Copilot adapters require the prerequisites below. Cursor, Antigravity and Hermes
 are recognized but safely rejected, not silently resumed.
@@ -61,6 +63,23 @@ description = "Fork pane"
 
 Validate with `herdr config check`, then `herdr --session default server reload-config`.
 No restart is required. A shortcut change does not load bridges into existing agents.
+
+### When the session ID is missing
+
+The normal action can open `codex fork` without a source ID. This is
+only available for plain `codex` processes without launch arguments,
+additional foreground processes, or a registered custom launcher. Existing proxy
+and configured launch paths still require their trusted session binding.
+
+The new panel is labelled **select session**, and the result is
+`awaiting_selection`, not a completed fork. Select the intended conversation in
+the native picker. No conversation is chosen automatically, no keys are sent to
+the source, and neither the normal CLI commands nor global hooks are changed.
+In Codex, use Enter to fork; its Esc action starts a new conversation instead.
+
+Malformed or foreign session references still fail closed. Read-only and historical
+message modes also require a trusted source ID and do not use this fallback.
+Claude Code keeps its existing direct-fork behavior and trusted identity requirement.
 
 ```sh
 herdr --session default plugin action invoke fork --plugin seungwonme.panel-fork
@@ -233,7 +252,8 @@ new ID. The native CLI can still perform its own normal authentication/network s
 
 A failed/login/trust/approval destination is **preserved**, never closed or answered
 automatically. Parent resources are never closed. Failures are not replaced by fresh
-conversations. Codex may delay its new ID until the first post-fork prompt; this is
+conversations. A missing-ID native picker is reported separately as
+`awaiting_selection`. Codex may delay its new ID until the first post-fork prompt; this is
 `started_identity_pending`, not verified identity. Claude can verify its explicit
 UUID from argv when read-only child hooks are disabled.
 

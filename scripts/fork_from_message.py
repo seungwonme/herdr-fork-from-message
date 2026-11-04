@@ -19,7 +19,7 @@ from agent_contracts import AGENTS, ENVIRONMENT_KEYS, PI_FAMILY, UNAVAILABLE, Co
 from harness_identity import ForegroundNotReady, candidate_diagnostics, entrypoint_argv, process_product, select_process, session_id, session_reference
 from native_sessions import NativeSessionError, copilot_fork
 from runtime_registry import PLUGIN_ID, RegistryError, process_start, read_record, state_root, write_record
-from saved_launcher import registered_launcher
+from saved_launcher import has_custom_binding, registered_launcher
 
 ROOT = Path(__file__).resolve().parents[1]
 DESTINATIONS = ("pane", "tab", "workspace")
@@ -58,6 +58,15 @@ class HerdrClient:
             return json.loads(p.stdout).get("sessions")
         except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as exc:
             raise ForkError("Herdr session list failed") from exc
+
+    def screen(self, pane_id: str) -> str:
+        try:
+            return subprocess.run(
+                [*self.prefix, "pane", "read", pane_id, "--source", "detection", "--lines", "80"],
+                capture_output=True, text=True, check=True, timeout=15,
+            ).stdout
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ForkError("Cannot read the destination's native fork picker") from exc
 
 
 def _without_flags(arguments: list[str], names: set[str]) -> list[str]:
@@ -108,7 +117,7 @@ def foreground(client: HerdrClient, pane_id: str, agent: str | None = None) -> d
 class ForkResult:
     status: str
     source_pane_id: str
-    source_session_id: str
+    source_session_id: str | None
     pane_id: str
     fork_session_id: str | None
     destination: str
@@ -156,6 +165,8 @@ class ForkWorkflow:
         cwd = pane.get("foreground_cwd") or pane.get("cwd")
         if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
             raise ForkError("Source working directory is unavailable")
+        if agent == "codex" and self.mode == "fork" and pane.get("agent_session") is None:
+            return self._codex_picker(pane, process, cwd)
         owner = None
         if agent in PI_FAMILY:
             owner = read_record(state_root(self.env), self.env.get("HERDR_SOCKET_PATH", ""), pane, process["pid"])
@@ -240,6 +251,55 @@ class ForkWorkflow:
 
     def _native_reference(self, pane: Mapping[str, Any], agent: str) -> str:
         return session_reference(pane, agent)
+
+    def _codex_picker_source(self, source: Mapping[str, Any], process: Mapping[str, Any]) -> None:
+        """An unbound plain TUI may open a picker, but never select a guessed thread."""
+        latest = object_value(self.client.json(["pane", "get", source["pane_id"]]).get("pane"), "source recheck")
+        info = object_value(self.client.json(["pane", "process-info", "--pane", source["pane_id"]]).get("process_info"), "process info")
+        processes = info.get("foreground_processes", [])
+        if not isinstance(processes, list) or any(not isinstance(item, dict) for item in processes):
+            raise ForkError("Source foreground processes cannot be verified")
+        try:
+            custom = has_custom_binding(self.client.sessions, self.env.get("HERDR_SOCKET_PATH", ""), source["pane_id"])
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ForkError("Cannot verify the source launcher for the native fork picker") from exc
+        if (len(processes) != 1 or processes[0].get("pid") != process["pid"]
+                or processes[0].get("argv") != process["argv"] or len(process["argv"]) != 1 or custom):
+            raise ForkError("No trusted codex session: native picker fallback requires plain codex without a wrapper or launch options")
+        if (latest.get("agent_session") is not None or latest.get("agent") != "codex"
+                or latest.get("agent_status") not in ("idle", "done")
+                or any(latest.get(key) != source.get(key) for key in ("terminal_id", "workspace_id", "tab_id", "cwd", "foreground_cwd"))):
+            raise ForkError("Source changed before the native fork picker could open")
+
+    def _codex_picker(self, source: Mapping[str, Any], process: Mapping[str, Any], cwd: str) -> ForkResult:
+        self._codex_picker_source(source, process)
+        environment = {key: self.env[key] for key in ENVIRONMENT_KEYS["codex"] if self.env.get(key)}
+        environment.update(HERDR_PANEL_FORK_READ_ONLY="0", HERDR_PANEL_FORK_AGENT="codex")
+        target = self._create_target(source, cwd, environment)
+        self.target = target
+        self._wait_shell(target["pane_id"])
+        self._start_native(target["pane_id"], "codex", ["fork"])
+        deadline = time.monotonic() + START_SECONDS
+        while time.monotonic() < deadline:
+            child = object_value(self.client.json(["pane", "get", target["pane_id"]]).get("pane"), "child pane")
+            if child.get("agent_status") == "blocked":
+                raise ForkError("Child requires login, trust, or permission input; no approval was answered")
+            child_process = foreground(self.client, target["pane_id"], "codex")
+            screen = self.client.screen(target["pane_id"])
+            # Codex abbreviates its footer in split panes.
+            picker_visible = "enter fork" in screen and ("esc start new" in screen or "esc new" in screen)
+            if entrypoint_argv(child_process)[1:] == ["fork"] and picker_visible:
+                break
+            time.sleep(POLL_SECONDS)
+        else:
+            raise ForkError("Native Codex fork picker could not be verified before timeout")
+        self._codex_picker_source(source, process)
+        self.client.json(["pane", "rename", target["pane_id"], "Panel Fork · Codex (select session)"])
+        if self.focus:
+            self.client.json(["agent", "focus", target["pane_id"]])
+        return ForkResult("awaiting_selection", source["pane_id"], None, target["pane_id"], None,
+                          self.destination, target["workspace_id"], target["tab_id"], cwd, "codex",
+                          "native permissions; choose the source conversation in Codex's fork picker")
 
     def _codex_mcp(self, argv: list[str]) -> list[tuple[str, str]]:
         try:
