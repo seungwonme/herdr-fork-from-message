@@ -88,3 +88,16 @@ def registered_launcher(list_sessions: Callable[[], Any], socket_path: str,
     except (OSError, ValueError, RuntimeError):
         return None
     return launcher_from_binding(saved_pane(data, pane_id), agent, session)
+
+
+def has_custom_binding(list_sessions: Callable[[], Any], socket_path: str, pane_id: str) -> bool:
+    """Never replace an unidentified wrapper with a bare native picker."""
+    path = store_path(list_sessions(), socket_path)
+    if path is None:
+        return False
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("version") != 3:
+        raise ValueError("Cannot verify saved launcher with this Herdr state format")
+    entry = saved_pane(data, pane_id)
+    binding = entry.get("agent_resume") if entry else None
+    return isinstance(binding, dict) and str(binding.get("source", "")).startswith("custom:")

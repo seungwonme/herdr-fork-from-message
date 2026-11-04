@@ -33,6 +33,11 @@ class FakeClient:
         self.child_argv = []
         self.store = None  # saved Herdr session.json content, or None when absent
         self.shell_runs = []
+        self.picker_screen = "enter fork   esc start new   ctrl+c quit"
+
+    def screen(self, pane_id):
+        self.calls.append(("pane", "read", pane_id))
+        return self.picker_screen
 
     def sessions(self):
         if self.store is None:
@@ -303,6 +308,112 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(module.ForkError, "No trusted"):
                 self.workflow(client).execute()
         self.assertFalse(any(c[:2] == ("agent", "start") for c in client.calls))
+
+    def test_plain_codex_without_session_opens_native_picker_without_selecting(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd, "codex")
+            client.argv = ["codex"]
+            client.missing_session = True
+            result = self.workflow(client, focus=False).execute()
+        self.assertEqual(result.status, "awaiting_selection")
+        self.assertIsNone(result.source_session_id)
+        self.assertIsNone(result.fork_session_id)
+        self.assertEqual(client.child_argv, ["codex", "fork"])
+        self.assertFalse(any(c[:2] in (("agent", "send-keys"), ("pane", "run"), ("agent", "focus")) for c in client.calls))
+        self.assertIn(("pane", "rename", "w:p2", "Panel Fork · Codex (select session)"), client.calls)
+
+    def test_codex_picker_accepts_compact_footer_in_split_pane(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd, "codex")
+            client.argv = ["codex"]
+            client.missing_session = True
+            client.picker_screen = "enter fork   esc new   ctrl+c quit   tab focus"
+            result = self.workflow(client).execute()
+        self.assertEqual(result.status, "awaiting_selection")
+
+    def test_missing_codex_identity_does_not_weaken_restricted_or_message_mode(self):
+        for mode in ("read-only", "message"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as cwd:
+                client = FakeClient(cwd, "codex")
+                client.argv = ["codex"]
+                client.missing_session = True
+                with self.assertRaisesRegex(module.ForkError, "No trusted"):
+                    self.workflow(client, mode=mode).execute()
+                self.assertFalse(any(c[:2] == ("pane", "split") for c in client.calls))
+
+    def test_unbound_codex_with_launch_options_or_registered_wrapper_is_not_replaced(self):
+        for wrapper in (False, True):
+            with self.subTest(wrapper=wrapper), tempfile.TemporaryDirectory() as cwd:
+                client = FakeClient(cwd, "codex")
+                client.missing_session = True
+                if wrapper:
+                    client.argv = ["codex"]
+                    client.store = self.saved_store(["codex-proxy", "resume", SOURCE], source="custom:codex", agent="codex", pane_number=1)
+                with self.assertRaisesRegex(module.ForkError, "requires plain codex"):
+                    self.workflow(client).execute()
+                self.assertFalse(any(c[:2] == ("pane", "split") for c in client.calls))
+
+    def test_codex_picker_does_not_accept_foreign_or_malformed_reference(self):
+        for reference in ({}, {"agent": "codex", "kind": "id", "source": "herdr:claude", "value": SOURCE}):
+            with self.subTest(reference=reference), tempfile.TemporaryDirectory() as cwd:
+                client = FakeClient(cwd, "codex")
+                client.argv = ["codex"]
+                original = client.pane
+                client.pane = lambda child=False: original(child) | {"agent_session": reference}
+                with self.assertRaisesRegex(module.ForkError, "No trusted"):
+                    self.workflow(client).execute()
+                self.assertFalse(any(c[:2] == ("pane", "split") for c in client.calls))
+
+    def test_missing_identity_with_foreground_wrapper_does_not_open_bare_picker(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd, "codex")
+            client.argv = ["codex"]
+            client.missing_session = True
+            original = client.json
+            def wrapped(args, **kwargs):
+                result = original(args, **kwargs)
+                if args[:2] == ["pane", "process-info"]:
+                    result["process_info"]["foreground_processes"].append({"pid": 99, "argv": ["bash", "codex-proxy"]})
+                return result
+            client.json = wrapped
+            with self.assertRaisesRegex(module.ForkError, "requires plain codex"):
+                self.workflow(client).execute()
+        self.assertFalse(any(c[:2] == ("pane", "split") for c in client.calls))
+
+    def test_picker_preserves_blocked_child_without_answering_approval(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd, "codex")
+            client.argv = ["codex"]
+            client.missing_session = client.blocked = True
+            with self.assertRaisesRegex(module.ForkError, "requires login.*Destination preserved"):
+                self.workflow(client).execute()
+        self.assertFalse(any(c[:2] in (("agent", "send-keys"), ("pane", "close")) for c in client.calls))
+
+    def test_codex_picker_requires_visible_picker_and_preserves_failed_destination(self):
+        with tempfile.TemporaryDirectory() as cwd, patch.object(module, "START_SECONDS", 0.001), patch.object(module.time, "sleep"):
+            client = FakeClient(cwd, "codex")
+            client.argv = ["codex"]
+            client.missing_session = True
+            client.picker_screen = "Ask Codex to do anything"
+            with self.assertRaisesRegex(module.ForkError, "picker could not be verified.*Destination preserved"):
+                self.workflow(client).execute()
+        self.assertFalse(any(c[1:2] == ("close",) for c in client.calls))
+
+    def test_codex_picker_rejects_source_switch_before_creating_destination(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            client = FakeClient(cwd, "codex")
+            client.argv = ["codex"]
+            client.missing_session = True
+            original = client.pane
+            def switched(child=False):
+                pane = original(child)
+                if client.source_reads > 1:
+                    pane["agent_session"] = {"agent": "codex", "kind": "id", "source": "herdr:codex", "value": CHILD}
+                return pane
+            client.pane = switched
+            with self.assertRaisesRegex(module.ForkError, "Source changed"):
+                self.workflow(client).execute()
+        self.assertFalse(any(c[:2] == ("pane", "split") for c in client.calls))
 
     def test_in_process_source_switch_is_rejected(self):
         with tempfile.TemporaryDirectory() as cwd:

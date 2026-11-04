@@ -21,6 +21,12 @@ identity comes from owner-written private records bound to the server socket,
 terminal, foreground PID/process-start and cwd. Records expire and are rechecked.
 The bridge never exports credentials, scans process environments, or rewrites JSONL.
 
+If a plain Codex source has no reported ID, the normal action may open its
+native fork picker in a child panel. It never infers an ID or chooses a conversation;
+the user selects it. The result remains `awaiting_selection`. Registered wrappers,
+launch arguments, malformed/foreign references, and restricted modes do not use
+this fallback. The source receives no input.
+
 Native process arguments use Herdr's launcher; Pi-family agents use a private temporary POSIX
 script. Failed destinations are preserved so approval/login state is not destroyed.
 Normal Panel Fork uses native permissions, tools, hooks and MCP settings; restored
