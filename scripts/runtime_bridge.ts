@@ -6,16 +6,11 @@ import { fileURLToPath } from "node:url";
 
 type Context = {
 	cwd: string;
-	sessionMetadata?: { kind: "main" | "sub"; taskDepth: number };
 	model?: { provider: string; id: string };
 	sessionManager: {
-		getCwd?(): string;
 		getSessionId(): string;
 		getSessionFile(): string | undefined;
 	};
-	getActiveModelProfile?: () => string | undefined;
-	getGoalState?: () => unknown;
-	operateGoal?: (op: "pause") => Promise<unknown>;
 	ui: { notify(message: string, level?: string): void };
 };
 type Event = {
@@ -28,7 +23,7 @@ type API = {
 	getThinkingLevel(): string | undefined;
 	setActiveTools(names: string[]): Promise<void>;
 };
-type PiAgent = "gjc" | "omp" | "pi" | "omo";
+type PiAgent = "omp" | "pi" | "omo";
 type Registration = {
 	status: "registered" | "not_ready" | "ignored";
 	reason?: string;
@@ -37,14 +32,11 @@ type Registration = {
 type BridgeOptions = {
 	register?: (payload: Record<string, unknown>) => Promise<Registration>;
 	now?: () => number;
-	wait?: (milliseconds: number) => Promise<void>;
 };
 
 const STARTUP_GRACE_MS = 10_000;
-const INVALIDATION_TIMEOUT_MS = 4000;
 
 const environmentKeys: Record<PiAgent, readonly string[]> = {
-	gjc: ["GJC_CONFIG_DIR", "GJC_CODING_AGENT_DIR"],
 	omp: ["PI_CONFIG_DIR", "PI_CODING_AGENT_DIR"],
 	pi: ["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"],
 	omo: [
@@ -117,7 +109,7 @@ export function runtimeAgent(
 }
 
 const root = dirname(fileURLToPath(import.meta.url));
-const reads = new Set(["read", "search", "find", "ast_grep", "grep", "glob"]);
+const reads = new Set(["read", "grep", "glob"]);
 const policy =
 	"Independent read-only fork: inherited work is background. Do not resume prior tasks, change files/memory/settings, create agents/jobs, or contact the parent. The checkout is shared. Only read tools are permitted.";
 
@@ -144,71 +136,28 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 		return;
 	}
 	const readOnly = process.env.HERDR_PANEL_FORK_READ_ONLY === "1";
-	const on: API["on"] = (name, handler) => {
-		api.on(name, (event, ctx) => {
-			// In-process GJC tasks share the owner's PID and inherited pane variables.
-			if (agent === "gjc" && ctx.sessionMetadata?.kind !== "main") return;
-			return handler(event, ctx);
-		});
-	};
+	const on = api.on.bind(api);
 	let current: Context | undefined;
 	let busy = false;
 	let ready = !readOnly;
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let warned = false;
-	let invalidated = false;
 	let nonOwner = false;
 	let stopped = false;
 	let notReadySince: number | undefined;
-	let transitionIdentity: string | undefined;
-	let tombstoneConfirmed = false;
-	let navigationCompleted = false;
 	const now = options.now ?? Date.now;
-	const wait =
-		options.wait ??
-		((milliseconds: number) =>
-			new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
-
-	function conversationIdentity(ctx: Context) {
-		return JSON.stringify([
-			ctx.sessionManager.getSessionId(),
-			ctx.sessionManager.getSessionFile() ?? null,
-			sessionCwd(ctx),
-		]);
-	}
-
-	function sessionCwd(ctx: Context): string {
-		if (agent !== "gjc") return ctx.cwd;
-		if (!ctx.sessionManager.getCwd)
-			throw new Error("GJC runtime does not expose its current session cwd");
-		return ctx.sessionManager.getCwd();
-	}
-
-	async function guard(ctx: Context) {
+	async function guard() {
 		if (!readOnly) return;
-		if (agent !== "gjc" && agent !== "omp")
+		if (agent !== "omp")
 			throw new Error(
 				`Read-only mode is not supported for ${agent}: native guard support has not been verified`,
 			);
-		// Pause through the owning session API, never rewrite its transcript.
-		if (agent === "gjc") {
-			if (!ctx.operateGoal)
-				throw new Error(
-					"GJC runtime does not expose the required goal pause gate",
-				);
-			await ctx.operateGoal("pause");
-		}
-		await api.setActiveTools(
-			agent === "gjc"
-				? ["read", "search", "find", "ast_grep"]
-				: ["read", "grep", "glob"],
-		);
+		await api.setActiveTools(["read", "grep", "glob"]);
 		ready = true;
 	}
 
-	async function publish(invalidate = false, timeout = 4000): Promise<boolean> {
-		if (busy || !current || nonOwner || stopped || (invalidated && !invalidate))
-			return false;
+	async function publish(): Promise<boolean> {
+		if (busy || !current || nonOwner || stopped) return false;
 		busy = true;
 		try {
 			const ctx = current;
@@ -219,7 +168,7 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 			const payload = {
 				agent,
 				pid: process.pid,
-				cwd: sessionCwd(ctx),
+				cwd: ctx.cwd,
 				session_id: ctx.sessionManager.getSessionId(),
 				session_file: ctx.sessionManager.getSessionFile(),
 				model:
@@ -228,12 +177,11 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 					ctx.model.id !== "unknown"
 						? `${ctx.model.provider}/${ctx.model.id}`
 						: undefined,
-				profile: ctx.getActiveModelProfile?.(),
 				thinking: api.getThinkingLevel(),
 				environment,
 				bridge_version: 1,
 				read_only_ready: ready,
-				registration_valid: !invalidated,
+				registration_valid: true,
 			};
 			const installed = join(
 				homedir(),
@@ -254,7 +202,7 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 						const child = spawn("python3", [helper, "--register"], {
 							env: helperEnvironment,
 							stdio: ["pipe", "pipe", "pipe"],
-							timeout,
+							timeout: 4000,
 						});
 						let detail = "";
 						let output = "";
@@ -287,7 +235,7 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 						child.stdin.on("error", () => {});
 						child.stdin.end(JSON.stringify(payload));
 					});
-			if (stopped || (invalidated && !invalidate)) return false;
+			if (stopped) return false;
 			if (
 				receipt.status === "ignored" &&
 				receipt.reason === "nested_non_owner"
@@ -302,7 +250,6 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 					receipt.reason ?? "",
 				)
 			) {
-				if (invalidate) return false;
 				notReadySince ??= now();
 				if (now() - notReadySince < STARTUP_GRACE_MS) return false;
 				throw new Error(
@@ -315,7 +262,7 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 			warned = false;
 			return true;
 		} catch (error) {
-			if (!invalidate && !warned && !stopped && !invalidated) {
+			if (!warned && !stopped) {
 				current?.ui.notify(
 					`Panel Fork registration unavailable: ${String(error)}`,
 					"warning",
@@ -328,41 +275,12 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 		}
 	}
 
-	async function invalidateOwner(ctx: Context): Promise<boolean> {
-		const deadline = now() + INVALIDATION_TIMEOUT_MS;
-		invalidated = true;
-		ready = false;
-		if (timer) clearInterval(timer);
-		timer = undefined;
-		while (busy && !stopped && now() < deadline) await wait(10);
-		if (nonOwner) return true;
-		for (
-			let attempt = 0;
-			attempt < 3 && !stopped && !busy && now() < deadline;
-			attempt++
-		) {
-			if (tombstoneConfirmed) return true;
-			if (await publish(true, Math.max(1, deadline - now()))) {
-				tombstoneConfirmed = true;
-				return true;
-			}
-			if (attempt < 2) await wait(100);
-		}
-		if (!stopped)
-			ctx.ui.notify(
-				"Panel Fork invalidation pending: the previous owner record could not be revoked. Session navigation was not confirmed; keep the current conversation until registration recovers.",
-				"warning",
-			);
-		return false;
-	}
-
 	const update = async (_event: Event, ctx: Context) => {
-		if (stopped || nonOwner || invalidated) return;
+		if (stopped || nonOwner) return;
 		current = ctx;
-		await guard(ctx);
-		if (invalidated) return;
+		await guard();
 		await publish();
-		if (!timer && !nonOwner && !stopped && !invalidated) {
+		if (!timer && !nonOwner && !stopped) {
 			timer = setInterval(() => {
 				void publish();
 			}, 5000);
@@ -376,57 +294,16 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 		"session_before_branch",
 		"session_before_tree",
 	]) {
-		on(event, async (_value, ctx) => {
-			if (readOnly) return { cancel: true };
-			if (
-				agent !== "gjc" ||
-				stopped ||
-				nonOwner ||
-				navigationCompleted ||
-				!current
-			)
-				return;
-			transitionIdentity = conversationIdentity(ctx);
-			if (!(await invalidateOwner(ctx))) return { cancel: true };
-		});
+		on(event, () => (readOnly ? { cancel: true } : undefined));
 	}
 	for (const event of ["session_switch", "session_branch", "session_tree"])
-		on(event, async (value, ctx) => {
-			if (agent === "gjc") {
-				// GJC 0.19 may retain the startup manager in extension contexts after a
-				// cold-sidecar transition. Refuse stale identity rather than re-publish it.
-				transitionIdentity = undefined;
-				navigationCompleted = true;
-				current ??= ctx;
-				if (await invalidateOwner(ctx))
-					ctx.ui.notify(
-						"Panel Fork registration invalidated by session navigation. Restart GJC to register its current session safely.",
-						"warning",
-					);
-				return;
-			}
-			await update(value, ctx);
-		});
+		on(event, update);
 	on("session_shutdown", () => {
 		stopped = true;
-		transitionIdentity = undefined;
 		if (timer) clearInterval(timer);
 		current = undefined;
 	});
 	on("before_agent_start", async (event, ctx) => {
-		// A cancelled transition has no switch event. Only the unchanged native
-		// conversation may recover, and only after a confirmed tombstone.
-		if (
-			invalidated &&
-			!navigationCompleted &&
-			transitionIdentity === conversationIdentity(ctx)
-		) {
-			if (!tombstoneConfirmed && !(await invalidateOwner(ctx))) return;
-			invalidated = false;
-			tombstoneConfirmed = false;
-			transitionIdentity = undefined;
-			ready = !readOnly;
-		}
 		await update(event, ctx);
 		if (!readOnly) return;
 		const original = event.systemPrompt ?? [];

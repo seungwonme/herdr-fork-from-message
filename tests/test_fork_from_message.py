@@ -134,16 +134,6 @@ class ContractTests(unittest.TestCase):
             with self.subTest(servers=servers), self.assertRaises(ContractError):
                 self.launch("codex", mcp_servers=servers)
 
-    def test_gjc_preserves_live_profile_and_session_directory(self):
-        launch = self.launch("gjc", argv=["gjc", "--model", "old", "--thinking", "low"],
-                             runtime={"model": "new/model", "profile": "work", "thinking": "high", "session_file": "/scope/current.jsonl"})
-        self.assertIn("work", launch.argv)
-        self.assertNotIn("old", launch.argv)
-        self.assertIn("high", launch.argv)
-        self.assertIn("/scope", launch.argv)
-        self.assertEqual(launch.argv[-1], "/goal pause")
-        self.assertNotIn("--extension", launch.argv)
-
     def test_omp_child_disables_discovery_and_loads_only_guard(self):
         args = self.launch("omp").argv
         self.assertIn("--no-extensions", args)
@@ -159,16 +149,15 @@ class ContractTests(unittest.TestCase):
         self.assertIn("new", args)
 
     def test_only_allowlisted_environment_is_relayed(self):
-        launch = self.launch("gjc", env={"GJC_CODING_AGENT_DIR": "/agent", "GJC_MASTER_CAPABILITY": "secret", "TOKEN": "secret"})
-        self.assertEqual(launch.environment["GJC_CODING_AGENT_DIR"], "/agent")
+        launch = self.launch("omp", env={"PI_CODING_AGENT_DIR": "/agent", "PRIVATE_CAPABILITY": "secret", "TOKEN": "secret"})
+        self.assertEqual(launch.environment["PI_CODING_AGENT_DIR"], "/agent")
         self.assertNotIn("TOKEN", launch.environment)
-        self.assertNotIn("GJC_MASTER_CAPABILITY", launch.environment)
+        self.assertNotIn("PRIVATE_CAPABILITY", launch.environment)
 
     def test_normal_fork_has_no_added_restrictions_for_any_agent(self):
         expected = {
             "claude": ("claude", "--resume", SOURCE, "--fork-session"),
             "codex": ("codex", "fork", SOURCE),
-            "gjc": ("gjc", "--fork", SOURCE),
             "omp": ("omp", "--fork", SOURCE),
         }
         for agent, argv in expected.items():
@@ -179,13 +168,13 @@ class ContractTests(unittest.TestCase):
 
     def test_missing_flag_value_is_rejected(self):
         with self.assertRaises(ContractError):
-            safe_launch_flags("gjc", ["gjc", "--model"])
+            safe_launch_flags("omp", ["omp", "--model"])
 
     def test_positional_separator_stops_flag_relay(self):
         self.assertEqual(safe_launch_flags("omp", ["omp", "--", "--model", "fake"]), [])
 
     def test_inherit_thinking_is_not_passed_as_invalid_effort(self):
-        args = self.launch("gjc", runtime={"thinking": "inherit"}).argv
+        args = self.launch("omp", runtime={"thinking": "inherit"}).argv
         self.assertNotIn("--thinking", args)
 
 
@@ -256,7 +245,7 @@ class WorkflowTests(unittest.TestCase):
             "native agent": self.saved_store(["claude", "--resume", SOURCE], pane_number=1),
             "stale session": self.saved_store(["claude-proxy", "--resume", CHILD], pane_number=1),
             "other pane": self.saved_store(["claude-proxy", "--resume", SOURCE], pane_number=2),
-            "foreign reporter": self.saved_store(["claude-proxy", "--resume", SOURCE], source="custom:gjc", pane_number=1),
+            "foreign reporter": self.saved_store(["claude-proxy", "--resume", SOURCE], source="custom:pi", pane_number=1),
             "extra arguments": self.saved_store(["claude-proxy", "--resume", SOURCE, "--model", "x"], pane_number=1),
             "path launcher": self.saved_store(["/tmp/evil", "--resume", SOURCE], pane_number=1),
             "shell syntax": self.saved_store(["a;b", "--resume", SOURCE], pane_number=1),
@@ -453,27 +442,27 @@ class WorkflowTests(unittest.TestCase):
         calls = [c for c in client.calls if c[:2] == ("agent", "send-keys")]
         self.assertEqual(calls, [("agent", "send-keys", "w:p2", "esc"), ("agent", "send-keys", "w:p2", "esc")])
 
-    def test_gjc_requires_fresh_owner_registration_before_creating_pane(self):
+    def test_omp_requires_fresh_owner_registration_before_creating_pane(self):
         with tempfile.TemporaryDirectory() as cwd, patch.object(module, "read_record", side_effect=RegistryError("expired")):
-            client = FakeClient(cwd, "gjc")
+            client = FakeClient(cwd, "omp")
             with self.assertRaisesRegex(module.ForkError, "expired"):
                 self.workflow(client).execute()
         self.assertFalse(any(c[:2] == ("pane", "split") for c in client.calls))
 
-    def test_gjc_uses_shell_launch_not_unsupported_agent_start(self):
+    def test_omp_uses_shell_launch_not_unsupported_agent_start(self):
         with tempfile.TemporaryDirectory() as cwd:
-            client = FakeClient(cwd, "gjc")
+            client = FakeClient(cwd, "omp")
             records = [dict(session_id=SOURCE, bridge_version=1, environment={"XDG_CACHE_HOME": "/owner-cache"}), dict(session_id=SOURCE), dict(session_id=CHILD, read_only_ready=True), dict(session_id=SOURCE)]
             with patch.object(module, "read_record", side_effect=records), patch.object(module.ForkWorkflow, "_start_shell", autospec=True) as start:
                 def launch(workflow, pane, argv):
                     client.child_argv = list(argv)
                 start.side_effect = launch
                 workflow = self.workflow(client)
-                workflow.env = {**workflow.env, "GJC_CODING_AGENT_DIR": "/wrong-caller-root", "XDG_CACHE_HOME": "/wrong-cache"}
+                workflow.env = {**workflow.env, "PI_CODING_AGENT_DIR": "/wrong-caller-root", "XDG_CACHE_HOME": "/wrong-cache"}
                 result = workflow.execute()
             self.assertEqual(result.fork_session_id, CHILD)
             self.assertIn("-u", client.child_argv)
-            self.assertIn("GJC_CODING_AGENT_DIR", client.child_argv)
+            self.assertIn("PI_CODING_AGENT_DIR", client.child_argv)
             self.assertIn("XDG_CACHE_HOME=/owner-cache", client.child_argv)
             self.assertFalse(any("wrong" in argument for argument in client.child_argv))
             self.assertFalse(any(c[:2] == ("agent", "start") for c in client.calls))
@@ -483,11 +472,11 @@ class RegistrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.client = FakeClient(self.tmp.name, "gjc")
+        self.client = FakeClient(self.tmp.name, "omp")
         self.env = {"HERDR_PANE_ID": "w:p1", "HERDR_SOCKET_PATH": "/fixture/socket",
                     "HERDR_PANEL_FORK_STATE_DIR": self.tmp.name,
-                    "GJC_HERDR_PANE_OWNER": '{"pid":99999,"paneId":"old:pane"}'}
-        self.payload = {"pid": 100, "agent": "gjc", "session_id": SOURCE, "cwd": self.tmp.name}
+                    "PRIVATE_INHERITED_OWNER": '{"pid":99999,"paneId":"old:pane"}'}
+        self.payload = {"pid": 100, "agent": "omp", "session_id": SOURCE, "cwd": self.tmp.name}
         self.parents = patch.object(module.os, "getppid", return_value=100)
         self.start = patch.object(module, "process_start", return_value="fixture-start")
         self.write = patch.object(module, "write_record", return_value=Path(self.tmp.name) / "owner.json")
@@ -520,13 +509,13 @@ class RegistrationTests(unittest.TestCase):
         write.assert_not_called()
 
     def test_claimed_agent_with_missing_arguments_is_not_startup_readiness(self):
-        with self.process_list([{"pid": 100, "name": "gjc", "argv": []}]), patch.object(module, "write_record") as write:
+        with self.process_list([{"pid": 100, "name": "omp", "argv": []}]), patch.object(module, "write_record") as write:
             with self.assertRaisesRegex(ContractError, "unverifiable"):
                 self.register()
             write.assert_not_called()
 
     def test_duplicate_and_foreign_candidates_remain_hard_failures(self):
-        for processes in ([{"pid": 100, "argv": ["gjc"]}, {"pid": 200, "argv": ["gjc"]}],
+        for processes in ([{"pid": 100, "argv": ["omp"]}, {"pid": 200, "argv": ["omp"]}],
                           [{"pid": 100, "argv": ["codex"]}]):
             with self.subTest(processes=processes), self.process_list(processes), patch.object(module, "write_record") as write:
                 with self.assertRaises(ContractError) as caught:
@@ -548,7 +537,7 @@ class RegistrationTests(unittest.TestCase):
 
     def test_nested_runtime_is_ignored_even_when_parent_and_child_are_both_listed(self):
         self.payload["pid"] = 200
-        processes = [{"pid": 100, "argv": ["gjc"]}, {"pid": 200, "argv": ["gjc"]}]
+        processes = [{"pid": 100, "argv": ["omp"]}, {"pid": 200, "argv": ["omp"]}]
         with self.process_list(processes), patch.object(module.os, "getppid", return_value=200), patch.object(module, "registration_ancestor", return_value=100), patch.object(module, "write_record") as write:
             self.assertEqual(self.register()["status"], "ignored")
             write.assert_not_called()
@@ -591,13 +580,13 @@ class RegistrationTests(unittest.TestCase):
 
 class AncestryTests(unittest.TestCase):
     def test_outer_coding_agent_is_identified_without_trusting_environment(self):
-        for parent_command, expected in (("gjc --resume /fixture.jsonl", 50), ("gjc user's prompt", 50), ("zsh", None)):
-            rows = {100: "50 gjc", 50: "2 " + parent_command}
+        for parent_command, expected in (("omp --resume /fixture.jsonl", 50), ("omp user's prompt", 50), ("zsh", None)):
+            rows = {100: "50 omp", 50: "2 " + parent_command}
             with self.subTest(parent=parent_command), patch.object(module.subprocess, "run", side_effect=lambda argv, **kwargs: type("Result", (), {"stdout": rows[int(argv[2])]})()):
                 self.assertEqual(module.registration_ancestor(100, 2), expected)
 
     def test_unrelated_or_cyclic_ancestry_is_rejected(self):
-        for rows in ({100: "1 gjc"}, {100: "50 gjc", 50: "100 zsh"}):
+        for rows in ({100: "1 omp"}, {100: "50 omp", 50: "100 zsh"}):
             with self.subTest(rows=rows), patch.object(module.subprocess, "run", side_effect=lambda argv, **kwargs: type("Result", (), {"stdout": rows[int(argv[2])]})()):
                 with self.assertRaisesRegex(module.ForkError, "does not reach"):
                     module.registration_ancestor(100, 2)
@@ -629,7 +618,7 @@ class RegistryTests(unittest.TestCase):
     def test_exact_binding_and_private_permissions(self):
         with tempfile.TemporaryDirectory() as cwd:
             root = Path(cwd)
-            pane = {"pane_id": "w:p1", "terminal_id": "t", "agent": "gjc", "cwd": cwd}
+            pane = {"pane_id": "w:p1", "terminal_id": "t", "agent": "omp", "cwd": cwd}
             data = {**pane, "pid": os.getpid(), "process_start": "start", "session_id": SOURCE}
             path = write_record(root, "/socket", data)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
@@ -645,7 +634,7 @@ class RegistryTests(unittest.TestCase):
     def test_symlink_record_is_rejected(self):
         with tempfile.TemporaryDirectory() as cwd:
             root = Path(cwd)
-            pane = {"pane_id": "w:p1", "terminal_id": "t", "agent": "gjc", "cwd": cwd}
+            pane = {"pane_id": "w:p1", "terminal_id": "t", "agent": "omp", "cwd": cwd}
             data = {**pane, "pid": os.getpid(), "process_start": "start", "session_id": SOURCE}
             path = write_record(root, "/socket", data)
             target = root / "foreign"

@@ -71,22 +71,12 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn("--standalone", launch.argv)
         self.assertIn("--fork", launch.argv)
 
-    def test_existing_gjc_and_omp_read_only_controls_remain(self):
-        for agent, tools in (("gjc", "read,search,find,ast_grep"), ("omp", "read,grep,glob")):
-            with self.subTest(agent=agent):
-                launch = self.launch(agent, read_only=True)
-                self.assertIn(tools, launch.argv)
-                self.assertIn("--no-lsp", launch.argv)
-                self.assertIn("--no-pty", launch.argv)
-                self.assertEqual(launch.environment["HERDR_PANEL_FORK_READ_ONLY"], "1")
-                if agent == "gjc":
-                    self.assertIn("--no-mcp", launch.argv)
-                    self.assertEqual(launch.argv[-1], "/goal pause")
-                    self.assertNotIn("--extension", launch.argv)
-                else:
-                    self.assertIn("--no-extensions", launch.argv)
-                    self.assertIn("/plugin/runtime_bridge.ts", launch.argv)
-                    self.assertIn("/plugin/read-only-omp.yml", launch.argv)
+    def test_existing_omp_read_only_controls_remain(self):
+        launch = self.launch("omp", read_only=True)
+        for argument in ("read,grep,glob", "--no-lsp", "--no-pty", "--no-extensions",
+                         "/plugin/runtime_bridge.ts", "/plugin/read-only-omp.yml"):
+            self.assertIn(argument, launch.argv)
+        self.assertEqual(launch.environment["HERDR_PANEL_FORK_READ_ONLY"], "1")
 
     def test_only_documented_value_flags_are_relayed(self):
         flags = {
@@ -127,14 +117,13 @@ class HarnessContractTests(unittest.TestCase):
                 environment = {key: f"/source/{key}" for key in (*keys, *XDG_KEYS)}
                 if agent == "opencode":
                     environment["OPENCODE_CONFIG_CONTENT"] = '{"model":"source/model"}'
-                environment.update({"API_KEY": "secret", "GJC_MASTER_CAPABILITY": "secret", "CURSOR_TOKEN": "secret"})
+                environment.update({"API_KEY": "secret", "CURSOR_TOKEN": "secret"})
                 environment["HERDR_PANEL_FORK_STATE_DIR"] = "/source/fork-state"
                 environment["HERDR_PANEL_FORK_HELPER"] = "/plugin/fork_from_message.py"
                 launch = self.launch(agent, environment=environment)
                 for key in (*keys, *XDG_KEYS, "HERDR_PANEL_FORK_STATE_DIR", "HERDR_PANEL_FORK_HELPER"):
                     self.assertEqual(launch.environment[key], environment[key])
                 self.assertNotIn("API_KEY", launch.environment)
-                self.assertNotIn("GJC_MASTER_CAPABILITY", launch.environment)
                 self.assertNotIn("CURSOR_TOKEN", launch.environment)
                 self.assertEqual(set(ENVIRONMENT_KEYS[agent]) - set(XDG_KEYS), set(keys))
 
@@ -167,12 +156,12 @@ class HarnessContractTests(unittest.TestCase):
                 self.assertNotIn("old-provider", launch.argv)
                 self.assertIn("current-provider/live-model", launch.argv)
 
-    def test_only_gjc_uses_live_model_profile(self):
+    def test_live_model_uses_provider_qualified_selector(self):
         for agent in PI_FAMILY:
             with self.subTest(agent=agent):
                 launch = self.launch(agent, runtime={"model": "provider/model", "profile": "work"})
-                self.assertIn("--mpreset" if agent == "gjc" else "--model", launch.argv)
-                self.assertEqual("work" in launch.argv, agent == "gjc")
+                self.assertIn("--model", launch.argv)
+                self.assertNotIn("work", launch.argv)
 
     def test_inherit_thinking_does_not_add_a_native_flag(self):
         for agent in PI_FAMILY:

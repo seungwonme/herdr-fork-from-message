@@ -4,7 +4,7 @@ Personal fork of [dmangla3/herdr-fork-from-message](https://github.com/dmangla3/
 One Herdr action opens an independent copy using the agent's native fork operation.
 When a plain Codex pane has no reported session ID, it opens the
 native conversation picker in the new panel instead. Choose the source there to fork.
-Claude Code, Codex, OMP, GJC, Pi and OMO have native launch paths. OpenCode and
+Claude Code, Codex, OMP, Pi and OMO have native launch paths. OpenCode and
 Copilot adapters require the prerequisites below. Cursor, Antigravity and Hermes
 are recognized but safely rejected, not silently resumed.
 
@@ -19,8 +19,7 @@ Both panels share files; a conversation fork is **not a Git worktree**.
 | --- | --- | --- |
 | Claude Code 2.1.310 | Native | Trusted Herdr ID; explicit new UUID |
 | Codex 0.164.0 | Native | Trusted Herdr ID; child identity can remain pending until a new prompt |
-| GJC 0.19.0 | Native | Fresh owner bridge registration |
-| OMP 18.12.6 | Native | Fresh owner bridge; configured provider returned 403 in prior QA |
+| OMP 18.16.0 | Native launch contract | Fresh owner bridge; installed CLI flags checked, current provider E2E unverified |
 | Pi 1.3.0 | Verified native fixture | Owner bridge; distinct IDs, all fixture entries inherited, parent ID unchanged |
 | OMO 5.1.46 | Verified native fixture | Owner bridge; original OMO launcher/config roots/extensions retained, not replaced by Pi |
 | OpenCode 2.1.4 | Conditional adapter | `mini --session ID --fork`; installed Herdr integration must report `ses_...` ID. Local integration absent; full panel E2E unverified |
@@ -42,7 +41,7 @@ never a substitute for a fork. See the limitations under Verification.
 | Fork pane | `seungwonme.panel-fork.fork` | Native current-point fork in a new panel, default |
 | Fork pane down | `seungwonme.panel-fork.fork-down` | Native fork below |
 | Fork into new tab | `seungwonme.panel-fork.fork-tab` | Native fork in a new tab |
-| Fork read-only | `seungwonme.panel-fork.read-only` | Optional restricted fork, four original harnesses only |
+| Fork read-only | `seungwonme.panel-fork.read-only` | Optional restricted fork, Claude/Codex/OMP only |
 | Fork from message | `seungwonme.panel-fork.from-message` | Historical picker, Claude/Codex only |
 
 Herdr 0.9.5's pane context menu does **not** list plugin actions. Right-click
@@ -109,9 +108,9 @@ read-only child disables hooks. OpenCode/Copilot use configuration roots from th
 invoking environment, not an owner snapshot: custom XDG/config roots must match the
 source. This equivalence has not been established for arbitrary existing sources.
 
-### GJC, OMP, Pi and OMO owner bridge
+### OMP, Pi and OMO owner bridge
 
-All four Pi-family sources require the plugin bridge, even when Pi reports a Herdr
+All three Pi-family sources require the plugin bridge, even when Pi reports a Herdr
 path. The private owner descriptor additionally proves live model/thinking/settings
 and configuration roots. It binds the exact session, transcript path, cwd,
 PID/process start, server socket and terminal. Owner-only records expire after
@@ -126,13 +125,6 @@ A helper launched directly by a nested runtime proves its foreground ancestor
 and skips registration without changing the parent's record. Inherited owner
 markers alone never grant or deny ownership.
 
-GJC also runs task sessions inside the foreground process. The bridge accepts
-only native `sessionMetadata.kind: "main"` events; child and unclassified sessions
-cannot publish, invalidate, or stop the parent registration. It reads the current
-cwd through `sessionManager.getCwd()` rather than the launch-time context, so
-worktree relocation does not leave the owner record on the previous directory.
-Other Pi-family runtimes keep their own context and process-ownership checks.
-
 For a single new Pi/OMO process, add `--extension <absolute-bridge-path>` to its
 normal launch command. No global configuration change is required for that process:
 
@@ -145,14 +137,6 @@ launcher and plugin. Before global registration, review the bridge and obtain ap
 append its path to existing extension arrays with the CLI's official configuration
 interface, never replace other entries. Start a **new** source process afterward.
 Existing processes are not remotely restarted or modified.
-
-GJC 0.19.0 can retain a startup manager facade after `/new`, `/resume`, `/fork` or
-`/tree`; the bridge revokes the owner record before admitting navigation instead
-of cloning stale identity. Revocation receives up to three attempts; an
-unconfirmed tombstone cancels navigation and reports invalidation pending.
-A cancelled navigation can resume registration only on a new turn with the
-exact unchanged conversation and a confirmed tombstone. A completed switch
-requires restarting GJC with the desired session before forking again.
 
 State lives at `~/.local/state/herdr/plugins/seungwonme.panel-fork/owners/`, or the
 Herdr plugin state directory. `HERDR_PANEL_FORK_STATE_DIR` explicitly relocates it.
@@ -167,7 +151,6 @@ launch and its identity is checked after child startup. Native paths are:
 claude --resume ID --fork-session --session-id NEW_ID
 codex fork ID
 omp --fork PATH
-gjc --fork PATH
 pi --fork PATH
 omo --fork PATH
 opencode mini --session ID --fork
@@ -270,8 +253,6 @@ Only `--mode read-only` or the read-only action applies these controls:
 - Claude: built-in `Read/Grep/Glob`, plan permissions, no MCP/hooks, appended policy.
 - Codex: native read-only sandbox, no approval escalation; apps/hooks/multi-agent/shell
   feature disabled and transport-valid MCP overrides. Punctuated MCP names fail closed.
-- GJC: `read/search/find/ast_grep`, no MCP/LSP/PTY; owner bridge rejects all other tools.
-  Native `/goal pause` and runtime goal pause stop inherited goals.
 - OMP: `read/grep/glob`, explicit guard extension only, goal-disabled child overlay;
   every other tool call is denied, including dynamically introduced names.
 
@@ -293,10 +274,11 @@ source races, missing/wrong IDs, placements, failure preservation, interpreter a
 Node-title identities, OMO launcher selection, blocked harnesses, navigation/goal
 controls, and bounded RPC framing/callbacks/timeouts/private-process cleanup.
 
-Earlier restricted-mode QA on macOS/Herdr 0.9.5 established GJC distinct IDs,
-inherited token recall and write refusal; OMP distinct IDs/guard readiness/history
-but its Bedrock model returned 403. Claude's explicit UUID was observed. Earlier
-Claude recall and Codex startup/MCP outcomes are not re-established by this change.
+Earlier restricted-mode QA on macOS/Herdr 0.9.5 established OMP distinct
+IDs/guard readiness/history, but its configured model returned 403. OMP 18.16.0
+CLI flags have been checked locally; current provider behavior is not verified by
+these tests. Claude's explicit UUID was observed in earlier QA. Earlier Claude
+recall and Codex startup/MCP outcomes are not re-established by this change.
 
 Additional model-free QA reused one disposable tab with one source and at most one
 child at a time. Pi and OMO produced distinct child IDs with equal inherited native
@@ -309,7 +291,7 @@ It was not installed as part of QA.
 
 No provider prompts were submitted. Model recall, complete tool-event fidelity and
 Copilot/OpenCode TUI E2E are not claimed. These fixtures contain no private parent
-content. Compatibility diagnostics and static API evidence do not mean all 11
+content. Compatibility diagnostics and static API evidence do not mean all 10
 harnesses are fully supported.
 
 ## Remove
