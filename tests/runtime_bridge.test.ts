@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,9 +12,7 @@ type Handler = Parameters<BridgeAPI["on"]>[1];
 type Context = Parameters<Handler>[1];
 const context = (): Context => ({
 	cwd: "/fixture",
-	sessionMetadata: { kind: "main", taskDepth: 0 },
 	sessionManager: {
-		getCwd: () => "/fixture",
 		getSessionId: () => "fixture",
 		getSessionFile: () => undefined,
 	},
@@ -46,18 +44,12 @@ function registrationFixture(agent: string, readOnly = false) {
 	});
 	const handlers = new Map<string, Handler>();
 	const tools: string[][] = [];
-	const pauses: string[] = [];
 	const ctx: Context = {
 		...context(),
 		model: { provider: "fixture-provider", id: "live-model" },
 		sessionManager: {
-			getCwd: () => "/fixture",
 			getSessionId: () => "child-session",
 			getSessionFile: () => "/fixture/sessions/child-session.jsonl",
-		},
-		getActiveModelProfile: () => "live-profile",
-		operateGoal: async (operation) => {
-			pauses.push(operation);
 		},
 	};
 	bridge({
@@ -74,7 +66,6 @@ function registrationFixture(agent: string, readOnly = false) {
 		handlers,
 		ctx,
 		tools,
-		pauses,
 		payload: () =>
 			JSON.parse(readFileSync(join(directory, "registration.json"), "utf8")),
 		helperEnvironment: () =>
@@ -90,7 +81,7 @@ describe("registration readiness", () => {
 		Object.assign(process.env, {
 			HERDR_ENV: "1",
 			HERDR_PANE_ID: "fixture",
-			HERDR_PANEL_FORK_AGENT: "gjc",
+			HERDR_PANEL_FORK_AGENT: "omp",
 			HERDR_PANEL_FORK_READ_ONLY: "0",
 		});
 		const handlers = new Map<string, Handler>();
@@ -107,169 +98,48 @@ describe("registration readiness", () => {
 				getThinkingLevel: () => "high",
 				setActiveTools: async () => {},
 			},
-			{ register: run, now, wait: async () => {} },
+			{ register: run, now },
 		);
 		shutdowns.push(() => handlers.get("session_shutdown")?.({}, ctx));
 		return { handlers, warnings, ctx };
 	}
 
-	test("in-process GJC children cannot replace or invalidate the parent record", async () => {
-		for (const metadata of [
-			{ kind: "sub" as const, taskDepth: 1 },
-			undefined,
-		]) {
-			const payloads: Record<string, unknown>[] = [];
-			const f = fixture(async (payload) => {
-				payloads.push(payload);
-				return { status: "registered" };
-			});
-			await f.handlers.get("session_start")?.({}, f.ctx);
-			const child: Context = {
-				...f.ctx,
-				sessionMetadata: metadata,
-				sessionManager: {
-					getCwd: () => "/fixture",
-					getSessionId: () => "task-child",
-					getSessionFile: () => "/fixture/parent/task-child.jsonl",
-				},
-			};
-			for (const event of [
-				"session_start",
-				"agent_end",
-				"before_agent_start",
-				"session_before_switch",
-				"session_before_branch",
-				"session_before_tree",
-				"session_switch",
-				"session_branch",
-				"session_tree",
-				"session_shutdown",
-			])
-				expect(await f.handlers.get(event)?.({}, child)).toBeUndefined();
-			await f.handlers.get("agent_end")?.({}, f.ctx);
-			expect(payloads.map((item) => item.session_id)).toEqual([
-				"fixture",
-				"fixture",
-			]);
-			expect(payloads.every((item) => item.registration_valid === true)).toBe(
-				true,
-			);
-			expect(f.warnings).toEqual([]);
-		}
-	});
-
-	test("reads the current GJC manager cwd rather than the launch context", async () => {
-		const payloads: Record<string, unknown>[] = [];
-		const f = fixture(async (payload) => {
-			payloads.push(payload);
-			return { status: "registered" };
-		});
-		let cwd = "/fixture";
-		f.ctx.sessionManager.getCwd = () => cwd;
-		await f.handlers.get("session_start")?.({}, f.ctx);
-		cwd = "/fixture/worktree";
-		await f.handlers.get("agent_end")?.({}, f.ctx);
-		expect(f.ctx.cwd).toBe("/fixture");
-		expect(payloads.map((item) => item.cwd)).toEqual([
-			"/fixture",
-			"/fixture/worktree",
-		]);
-	});
-
-	test("GJC without its current cwd API fails before any registration", async () => {
-		let calls = 0;
-		const f = fixture(async () => {
-			calls++;
-			return { status: "registered" };
-		});
-		delete f.ctx.sessionManager.getCwd;
-		await f.handlers.get("session_start")?.({}, f.ctx);
-		expect(calls).toBe(0);
-		expect(f.warnings).toHaveLength(1);
-		expect(f.warnings[0]).toContain("current session cwd");
-	});
-
-	test("a live cwd change cannot rearm a cancelled GJC transition", async () => {
-		const payloads: Record<string, unknown>[] = [];
-		const f = fixture(async (payload) => {
-			payloads.push(payload);
-			return { status: "registered" };
-		});
-		await f.handlers.get("session_start")?.({}, f.ctx);
-		await f.handlers.get("session_before_switch")?.({}, f.ctx);
-		f.ctx.sessionManager.getCwd = () => "/fixture/other";
-		await f.handlers.get("before_agent_start")?.({}, f.ctx);
-		expect(payloads.map((item) => item.registration_valid)).toEqual([
-			true,
-			false,
-		]);
-	});
-
-	test("child startup creates no heartbeat and the main heartbeat reads a moved cwd", async () => {
-		const timer = setInterval(() => {}, 60_000);
-		timer.unref();
-		const timers = spyOn(globalThis, "setInterval").mockReturnValue(timer);
-		try {
-			const payloads: Record<string, unknown>[] = [];
-			const f = fixture(async (payload) => {
-				payloads.push(payload);
-				return { status: "registered" };
-			});
-			await f.handlers.get("session_start")?.(
-				{},
-				{
-					...f.ctx,
-					sessionMetadata: { kind: "sub", taskDepth: 1 },
-				},
-			);
-			expect(timers).not.toHaveBeenCalled();
-			expect(payloads).toEqual([]);
-			await f.handlers.get("session_start")?.({}, f.ctx);
-			expect(timers).toHaveBeenCalledTimes(1);
-			f.ctx.sessionManager.getCwd = () => "/fixture/moved";
-			const heartbeat = timers.mock.calls[0]?.[0];
-			expect(typeof heartbeat).toBe("function");
-			if (typeof heartbeat === "function") heartbeat();
-			await Promise.resolve();
-			expect(payloads.map((item) => item.cwd)).toEqual([
-				"/fixture",
-				"/fixture/moved",
-			]);
-		} finally {
-			timers.mockRestore();
-			clearInterval(timer);
-		}
-	});
-
-	test("a GJC child cannot register but still obeys inherited read-only tool guards", async () => {
-		const f = registrationFixture("gjc", true);
-		f.ctx.sessionMetadata = { kind: "sub", taskDepth: 1 };
-		await f.handlers.get("session_start")?.({}, f.ctx);
-		expect(
-			await f.handlers.get("before_agent_start")?.(
-				{ systemPrompt: "child" },
-				f.ctx,
-			),
-		).toBeUndefined();
-		expect(
-			await f.handlers.get("session_before_switch")?.({}, f.ctx),
-		).toBeUndefined();
-		expect(
-			await f.handlers.get("tool_call")?.({ toolName: "bash" }, f.ctx),
-		).toMatchObject({ block: true });
-		expect(f.tools).toEqual([]);
-		expect(f.pauses).toEqual([]);
-	});
-
-	test("other Pi-family runtimes do not require GJC metadata or cwd APIs", async () => {
+	test("Pi-family runtimes register the current context cwd", async () => {
 		for (const agent of ["omp", "pi", "omo"]) {
 			const f = registrationFixture(agent);
-			delete f.ctx.sessionMetadata;
-			delete f.ctx.sessionManager.getCwd;
 			f.ctx.cwd = `/fixture/${agent}`;
 			await f.handlers.get("session_start")?.({}, f.ctx);
 			expect(f.payload().cwd).toBe(`/fixture/${agent}`);
 		}
+	});
+
+	test("normal OMP navigation refreshes the owner from the new context", async () => {
+		const payloads: Record<string, unknown>[] = [];
+		const f = fixture(async (payload) => {
+			payloads.push(payload);
+			return { status: "registered" };
+		});
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		const next = {
+			...f.ctx,
+			cwd: "/fixture/next",
+			sessionManager: {
+				getSessionId: () => "next-session",
+				getSessionFile: () => "/fixture/next/session.jsonl",
+			},
+		};
+		await f.handlers.get("session_switch")?.({}, next);
+		await f.handlers.get("agent_end")?.({}, next);
+		expect(payloads.map((item) => item.session_id)).toEqual([
+			"fixture",
+			"next-session",
+			"next-session",
+		]);
+		expect(payloads[1]?.cwd).toBe("/fixture/next");
+		expect(payloads.every((item) => item.registration_valid === true)).toBe(
+			true,
+		);
+		expect(f.warnings).toEqual([]);
 	});
 
 	test("not-ready startup followed by success does not warn", async () => {
@@ -331,164 +201,11 @@ describe("registration readiness", () => {
 		await f.handlers.get("agent_end")?.({}, f.ctx);
 		expect(calls).toBe(1);
 	});
-
-	test("navigation invalidation cannot restart an unready registration", async () => {
-		let calls = 0;
-		const f = fixture(async () => {
-			calls++;
-			return { status: "not_ready", reason: "foreground_not_visible" };
-		});
-		await f.handlers.get("session_start")?.({}, f.ctx);
-		await f.handlers.get("session_switch")?.({}, f.ctx);
-		const invalidatedCalls = calls;
-		await f.handlers.get("agent_end")?.({}, f.ctx);
-		expect(calls).toBe(invalidatedCalls);
-		expect(f.warnings.some((message) => message.includes("invalidated"))).toBe(
-			false,
-		);
-		expect(
-			f.warnings.some((message) => message.includes("invalidation pending")),
-		).toBe(true);
-	});
-
-	test("failed tombstone cancels navigation instead of claiming invalidation", async () => {
-		const payloads: Record<string, unknown>[] = [];
-		const f = fixture(async (payload) => {
-			payloads.push(payload);
-			return payload.registration_valid === false
-				? { status: "not_ready", reason: "foreground_not_visible" }
-				: { status: "registered" };
-		});
-		await f.handlers.get("session_start")?.({}, f.ctx);
-		expect(await f.handlers.get("session_before_switch")?.({}, f.ctx)).toEqual({
-			cancel: true,
-		});
-		expect(payloads.filter((p) => p.registration_valid === false)).toHaveLength(
-			3,
-		);
-		expect(
-			f.warnings.some((message) => message.includes("invalidation pending")),
-		).toBe(true);
-		expect(
-			f.warnings.some((message) => message.includes("invalidated by")),
-		).toBe(false);
-	});
-
-	test("transient invalidation is retried and confirmed before navigation", async () => {
-		let attempts = 0;
-		const f = fixture(async (payload) => {
-			if (payload.registration_valid === false && ++attempts === 1)
-				return { status: "not_ready", reason: "foreground_not_visible" };
-			return { status: "registered" };
-		});
-		await f.handlers.get("session_start")?.({}, f.ctx);
-		expect(
-			await f.handlers.get("session_before_switch")?.({}, f.ctx),
-		).toBeUndefined();
-		expect(attempts).toBe(2);
-		await f.handlers.get("session_switch")?.({}, f.ctx);
-		expect(attempts).toBe(2);
-		expect(
-			f.warnings.some((message) => message.includes("invalidated by")),
-		).toBe(true);
-	});
-
-	test("cancelled navigation restores the exact unchanged conversation on a new turn", async () => {
-		const payloads: Record<string, unknown>[] = [];
-		const f = fixture(async (payload) => {
-			payloads.push(payload);
-			return { status: "registered" };
-		});
-		await f.handlers.get("session_start")?.({}, f.ctx);
-		await f.handlers.get("session_before_switch")?.({}, f.ctx);
-		await f.handlers.get("agent_end")?.({}, f.ctx);
-		expect(payloads.map((p) => p.registration_valid)).toEqual([true, false]);
-		await f.handlers.get("before_agent_start")?.({}, f.ctx);
-		expect(payloads.map((p) => p.registration_valid)).toEqual([
-			true,
-			false,
-			true,
-		]);
-	});
-
-	test("completed navigation cannot be rearmed by another cancelled navigation", async () => {
-		const payloads: Record<string, unknown>[] = [];
-		const f = fixture(async (payload) => {
-			payloads.push(payload);
-			return { status: "registered" };
-		});
-		await f.handlers.get("session_start")?.({}, f.ctx);
-		await f.handlers.get("session_before_switch")?.({}, f.ctx);
-		await f.handlers.get("session_switch")?.({}, f.ctx);
-		await f.handlers.get("session_before_switch")?.({}, f.ctx);
-		await f.handlers.get("before_agent_start")?.({}, f.ctx);
-		expect(payloads.map((p) => p.registration_valid)).toEqual([true, false]);
-	});
-
-	test("failed revocation is confirmed before an unchanged turn recovers", async () => {
-		let recovered = false;
-		const payloads: Record<string, unknown>[] = [];
-		const f = fixture(async (payload) => {
-			payloads.push(payload);
-			if (payload.registration_valid === false && !recovered)
-				throw new Error("temporarily_unavailable");
-			return { status: "registered" };
-		});
-		await f.handlers.get("session_start")?.({}, f.ctx);
-		expect(await f.handlers.get("session_before_switch")?.({}, f.ctx)).toEqual({
-			cancel: true,
-		});
-		recovered = true;
-		await f.handlers.get("before_agent_start")?.({}, f.ctx);
-		expect(payloads.slice(-2).map((p) => p.registration_valid)).toEqual([
-			false,
-			true,
-		]);
-	});
-
-	test("hard invalidation errors block all navigation kinds without successful claims", async () => {
-		for (const name of [
-			"session_before_switch",
-			"session_before_branch",
-			"session_before_tree",
-		]) {
-			const f = fixture(async (payload) => {
-				if (payload.registration_valid === false)
-					throw new Error("owner_changed");
-				return { status: "registered" };
-			});
-			await f.handlers.get("session_start")?.({}, f.ctx);
-			expect(await f.handlers.get(name)?.({}, f.ctx)).toEqual({ cancel: true });
-			expect(f.warnings).toHaveLength(1);
-			expect(f.warnings[0]).toContain("invalidation pending");
-		}
-	});
-
-	test("elapsed invalidation deadline does not restart grace or keep retrying", async () => {
-		let now = 0;
-		let attempts = 0;
-		const f = fixture(
-			async (payload) => {
-				if (payload.registration_valid === false) {
-					attempts++;
-					now = 5000;
-					return { status: "not_ready", reason: "foreground_not_visible" };
-				}
-				return { status: "registered" };
-			},
-			() => now,
-		);
-		await f.handlers.get("session_start")?.({}, f.ctx);
-		expect(await f.handlers.get("session_before_switch")?.({}, f.ctx)).toEqual({
-			cancel: true,
-		});
-		expect(attempts).toBe(1);
-	});
 });
 
 describe("Pi-family product identity", () => {
 	test("a bare Bun runtime can use an explicit product identity", () => {
-		for (const agent of ["gjc", "omp", "pi", "omo"] as const)
+		for (const agent of ["omp", "pi", "omo"] as const)
 			expect(
 				runtimeAgent(
 					{ HERDR_PANEL_FORK_AGENT: agent, OMO_NATIVE: "1" },
@@ -516,7 +233,7 @@ describe("Pi-family product identity", () => {
 		for (const [executable, argv, explicit] of [
 			["/opt/bin/pi", ["pi"], "omo"],
 			["/opt/bin/omo", ["omo"], "pi"],
-			["/opt/bin/gjc", ["gjc"], "omp"],
+			["/opt/bin/omp", ["omp"], "pi"],
 			["/opt/bin/omp", ["omp"], "unknown"],
 			[
 				"/usr/bin/bun",
@@ -546,7 +263,7 @@ describe("Pi-family product identity", () => {
 		}
 	});
 	test("known native executable and engine paths identify the product", () => {
-		for (const agent of ["gjc", "omp", "pi", "omo"] as const) {
+		for (const agent of ["omp", "pi", "omo"] as const) {
 			expect(runtimeAgent({}, `/opt/bin/${agent}`, [agent])).toBe(agent);
 		}
 		for (const [path, agent] of [
@@ -664,7 +381,6 @@ describe("Pi-family owner registration", () => {
 		});
 	});
 	for (const [agent, keys] of [
-		["gjc", ["GJC_CONFIG_DIR", "GJC_CODING_AGENT_DIR"]],
 		["omp", ["PI_CONFIG_DIR", "PI_CODING_AGENT_DIR"]],
 		["pi", ["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"]],
 		[
@@ -696,7 +412,6 @@ describe("Pi-family owner registration", () => {
 				"/fixture/sessions/child-session.jsonl",
 			);
 			expect(payload.model).toBe("fixture-provider/live-model");
-			expect(payload.profile).toBe("live-profile");
 			expect(payload.thinking).toBe("high");
 			expect(payload.read_only_ready).toBe(true);
 			expect(payload.registration_valid).toBe(true);
@@ -705,7 +420,6 @@ describe("Pi-family owner registration", () => {
 			expect(payload.environment.XDG_STATE_HOME).toBe("/source/XDG_STATE_HOME");
 			expect(payload.environment.PANEL_FORK_TEST_API_KEY).toBeUndefined();
 			expect(fixture.tools).toEqual([]);
-			expect(fixture.pauses).toEqual([]);
 			for (const toolName of ["write", "bash", "goal", "task"])
 				expect(
 					await fixture.handlers.get("tool_call")?.({ toolName }, fixture.ctx),
@@ -738,17 +452,12 @@ describe("Pi-family owner registration", () => {
 			expect(fixture.payload().model).toBe("updated/model");
 		});
 	}
-	for (const agent of ["gjc", "omp"]) {
+	for (const agent of ["omp"]) {
 		test(`${agent} retains its verified read-only runtime gates`, async () => {
 			const fixture = registrationFixture(agent, true);
 			await fixture.handlers.get("session_start")?.({}, fixture.ctx);
 			expect(fixture.payload().read_only_ready).toBe(true);
-			expect(fixture.tools).toEqual([
-				agent === "gjc"
-					? ["read", "search", "find", "ast_grep"]
-					: ["read", "grep", "glob"],
-			]);
-			expect(fixture.pauses).toEqual(agent === "gjc" ? ["pause"] : []);
+			expect(fixture.tools).toEqual([["read", "grep", "glob"]]);
 			expect(
 				await fixture.handlers.get("tool_call")?.(
 					{ toolName: "bash" },
@@ -800,11 +509,14 @@ describe("Pi-family owner registration", () => {
 });
 
 describe("optional read-only tool boundary", () => {
-	for (const name of ["read", "search", "find", "ast_grep", "grep", "glob"]) {
+	for (const name of ["read", "grep", "glob"]) {
 		test(`allows ${name}`, () =>
 			expect(readOnlyGuard({ toolName: name })).toBeUndefined());
 	}
 	for (const name of [
+		"search",
+		"find",
+		"ast_grep",
 		"goal",
 		"write",
 		"bash",
@@ -833,56 +545,11 @@ describe("optional read-only tool boundary", () => {
 		});
 		expect(handlers).toEqual([]);
 	});
-	test("GJC refuses a read-only runtime without authoritative pause control", async () => {
-		Object.assign(process.env, {
-			HERDR_ENV: "1",
-			HERDR_PANE_ID: "fixture",
-			HERDR_PANEL_FORK_AGENT: "gjc",
-			HERDR_PANEL_FORK_READ_ONLY: "1",
-		});
-		const handlers = new Map<string, Handler>();
-		bridge({
-			on: (name, handler) => {
-				handlers.set(name, handler);
-			},
-			getThinkingLevel: () => "high",
-			setActiveTools: async () => {},
-		});
-		await expect(
-			handlers.get("session_start")?.({}, context()),
-		).rejects.toThrow("goal pause gate");
-	});
-	test("in-process GJC navigation stops future registration instead of trusting stale context", async () => {
-		Object.assign(process.env, {
-			HERDR_ENV: "1",
-			HERDR_PANE_ID: "fixture",
-			HERDR_PANEL_FORK_AGENT: "gjc",
-		});
-		delete process.env.HERDR_PANEL_FORK_READ_ONLY;
-		const handlers = new Map<string, Handler>();
-		const warnings: string[] = [];
-		bridge({
-			on: (name, handler) => {
-				handlers.set(name, handler);
-			},
-			getThinkingLevel: () => "high",
-			setActiveTools: async () => {},
-		});
-		await handlers.get("session_switch")?.(
-			{},
-			{
-				...context(),
-				ui: { notify: (message: string) => warnings.push(message) },
-			},
-		);
-		expect(warnings[0]).toContain("invalidation pending");
-		await handlers.get("session_shutdown")?.({}, context());
-	});
 	test("read-only forks cancel all in-process identity navigation", async () => {
 		Object.assign(process.env, {
 			HERDR_ENV: "1",
 			HERDR_PANE_ID: "fixture",
-			HERDR_PANEL_FORK_AGENT: "gjc",
+			HERDR_PANEL_FORK_AGENT: "omp",
 			HERDR_PANEL_FORK_READ_ONLY: "1",
 		});
 		const handlers = new Map<string, Handler>();
@@ -907,7 +574,7 @@ describe("optional read-only tool boundary", () => {
 		Object.assign(process.env, {
 			HERDR_ENV: "1",
 			HERDR_PANE_ID: "fixture",
-			HERDR_PANEL_FORK_AGENT: "gjc",
+			HERDR_PANEL_FORK_AGENT: "omp",
 			HERDR_PANEL_FORK_READ_ONLY: "0",
 		});
 		const handlers = new Map<string, Handler>();

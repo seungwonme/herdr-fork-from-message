@@ -479,7 +479,7 @@ def register(client: HerdrClient, env: Mapping[str, str], payload: Mapping[str, 
     cwd = str(Path(requested_cwd).resolve())
     if cwd != str(Path(pane_cwd).resolve()):
         raise ForkError("Registration cwd does not match owner cwd")
-    safe = {key: payload[key] for key in ("model", "profile", "thinking", "session_file", "bridge_version", "read_only_ready", "registration_valid") if key in payload}
+    safe = {key: payload[key] for key in ("model", "thinking", "session_file", "bridge_version", "read_only_ready", "registration_valid") if key in payload}
     environment = payload.get("environment", {})
     if not isinstance(environment, dict) or any(key not in ENVIRONMENT_KEYS[kind] for key in environment):
         raise ForkError("Owner registration contains unsupported environment keys")

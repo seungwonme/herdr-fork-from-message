@@ -16,7 +16,7 @@ For non-sensitive bugs, use the public issue tracker.
 ## Security model
 
 This plugin controls local Herdr terminals under the current user's permissions.
-Claude/Codex/OpenCode/Copilot source identity comes from matching Herdr integrations. GJC/OMP/Pi/OMO
+Claude/Codex/OpenCode/Copilot source identity comes from matching Herdr integrations. OMP/Pi/OMO
 identity comes from owner-written private records bound to the server socket,
 terminal, foreground PID/process-start and cwd. Records expire and are rechecked.
 The bridge never exports credentials, scans process environments, or rewrites JSONL.

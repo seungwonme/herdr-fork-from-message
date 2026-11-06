@@ -5,6 +5,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Remove the retired harness launch and bridge support; keep OMP native fork, owner registration, and optional read-only controls.
+
 - Open the native fork picker for plain Codex panes with no reported session ID; distinguish `awaiting_selection` from completed forks without changing CLI commands or global hooks.
 
 - Start Claude forks with the wrapper launcher a pane registered for Herdr restart recovery (`custom:claude` resume `LAUNCHER --resume ID`), so proxy launchers fork through the same launcher.

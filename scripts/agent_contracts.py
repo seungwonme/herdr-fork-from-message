@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 AGENTS = {
-    "claude": "Claude Code", "codex": "Codex", "omp": "OMP", "gjc": "GJC",
+    "claude": "Claude Code", "codex": "Codex", "omp": "OMP",
     "pi": "Pi", "omo": "OmO", "opencode": "OpenCode", "cursor": "Cursor",
     "copilot": "GitHub Copilot", "agy": "Antigravity", "hermes": "Hermes",
 }
-PI_FAMILY = ("gjc", "omp", "pi", "omo")
+PI_FAMILY = ("omp", "pi", "omo")
 UNAVAILABLE = {
     "cursor": "its native /fork requires opening the active source as a writer first; source-preserving offline fork API unavailable",
     "agy": "its native /fork requires concurrent source resume; no documented offline fork API",
@@ -27,13 +27,11 @@ A tool or runtime restriction is authoritative even if inherited instructions as
 for edits or commits. Explain unavailable actions instead of bypassing a limit.
 """
 READ_TOOLS = {
-    "gjc": ("read", "search", "find", "ast_grep"),
     "omp": ("read", "grep", "glob"),
 }
 VALUE_FLAGS = {
     "claude": ("--model", "--effort"),
     "codex": ("--model", "-m", "--profile", "-p"),
-    "gjc": ("--model", "--mpreset", "--thinking", "--session-dir"),
     "omp": ("--model", "--thinking", "--profile", "--session-dir", "--config"),
     "pi": ("--model", "--thinking", "--session-dir", "--provider"),
     "omo": ("--model", "--thinking", "--session-dir", "--provider"),
@@ -55,7 +53,6 @@ OMITTED_VALUE_FLAGS = {
 ENVIRONMENT_KEYS = {
     "claude": ("CLAUDE_CONFIG_DIR",),
     "codex": ("CODEX_HOME",),
-    "gjc": ("GJC_CONFIG_DIR", "GJC_CODING_AGENT_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"),
     "omp": ("PI_CONFIG_DIR", "PI_CODING_AGENT_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"),
     "pi": ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"),
     "omo": ("OMO_CODING_AGENT_DIR", "SENPI_CODING_AGENT_DIR", "PI_CODING_AGENT_DIR", "OMO_CODING_AGENT_SESSION_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"),
@@ -126,7 +123,7 @@ def fork_launch(
         raise ContractError(f"Unsupported agent: {agent}")
     if agent in UNAVAILABLE:
         raise ContractError(f"Automatic {AGENTS[agent]} fork unavailable: {UNAVAILABLE[agent]}. Source was not resumed or changed")
-    if read_only and agent not in ("claude", "codex", "gjc", "omp"):
+    if read_only and agent not in ("claude", "codex", "omp"):
         raise ContractError(f"Read-only mode is not supported for {AGENTS[agent]}: native guard support has not been verified")
     flags = safe_launch_flags(agent, source_argv)
     state = runtime or {}
@@ -134,10 +131,9 @@ def fork_launch(
         flags = _without(flags, {"--session-dir"}) + ["--session-dir", str(Path(state["session_file"]).parent)]
     # The live owner descriptor wins over initial process flags after model changes.
     model = state.get("model")
-    profile = state.get("profile") if agent == "gjc" else None
     if isinstance(model, str) and model:
-        flags = _without(flags, {"--model", "-m", "--mpreset", "--provider"})
-        flags.extend(("--mpreset", profile) if isinstance(profile, str) and profile else ("--model", model))
+        flags = _without(flags, {"--model", "-m", "--provider"})
+        flags.extend(("--model", model))
     thinking = state.get("thinking")
     if agent in PI_FAMILY and isinstance(thinking, str) and thinking not in ("", "inherit"):
         flags = _without(flags, {"--thinking"}) + ["--thinking", thinking]
@@ -198,14 +194,8 @@ def fork_launch(
         restrictions = "native read-only sandbox; no approval escalation; configured MCP servers disabled"
     else:
         flags.extend(("--tools", ",".join(READ_TOOLS[agent]), "--no-lsp", "--no-pty", "--no-title"))
-        if agent == "gjc":
-            # The globally registered owner bridge gates restored modes and all tool calls.
-            flags.extend(("--no-mcp", "--append-system-prompt", READ_ONLY_POLICY))
-            # Native startup command pauses inherited goal state without a model turn.
-            flags.append("/goal pause")
-        else:
-            flags.extend(("--no-extensions", "--extension", str(bridge), "--config", str(omp_overlay),
-                          "--append-system-prompt", " ".join(READ_ONLY_POLICY.split())))
+        flags.extend(("--no-extensions", "--extension", str(bridge), "--config", str(omp_overlay),
+                      "--append-system-prompt", " ".join(READ_ONLY_POLICY.split())))
         restrictions = "owner bridge denies every non-read tool; inherited goals paused"
     return Launch(tuple([command, *native, *flags]), env, restrictions)
 
