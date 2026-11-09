@@ -15,9 +15,8 @@ import time
 from typing import Any, Mapping, Sequence
 import uuid
 
-from agent_contracts import AGENTS, ENVIRONMENT_KEYS, PI_FAMILY, UNAVAILABLE, ContractError, fork_launch, safe_launch_flags
+from agent_contracts import AGENTS, ENVIRONMENT_KEYS, ContractError, fork_launch, safe_launch_flags
 from harness_identity import ForegroundNotReady, candidate_diagnostics, entrypoint_argv, process_product, select_process, session_id, session_reference
-from native_sessions import NativeSessionError, copilot_fork
 from runtime_registry import PLUGIN_ID, RegistryError, process_start, read_record, state_root, write_record
 from saved_launcher import has_custom_binding, registered_launcher
 
@@ -138,7 +137,7 @@ class ForkWorkflow:
     def execute(self) -> ForkResult:
         try:
             return self._execute()
-        except (ForkError, ContractError, RegistryError, NativeSessionError) as exc:
+        except (ForkError, ContractError, RegistryError) as exc:
             # A live process or approval dialog may exist. Preserve it, never close on error.
             suffix = f" Destination preserved: {self.target['pane_id']}." if self.target else ""
             raise ForkError(str(exc) + suffix) from exc
@@ -151,15 +150,13 @@ class ForkWorkflow:
         if pane.get("pane_id") != source_id or pane.get("workspace_id") != self.context.get("workspace_id"):
             raise ForkError("Source pane/workspace identity changed")
         reported_agent = pane.get("agent")
-        if reported_agent and reported_agent not in AGENTS and reported_agent not in ("antigravity_cli", "antigravity-cli", "cursor-agent"):
+        if reported_agent and reported_agent not in AGENTS:
             raise ForkError("Supported agents: " + ", ".join(AGENTS))
         process = foreground(self.client, source_id, reported_agent)
         agent = process["product"]
         if agent not in AGENTS:
             raise ForkError("Supported agents: " + ", ".join(AGENTS))
         pane = {**pane, "agent": agent}
-        if agent in UNAVAILABLE:
-            raise ForkError(f"Automatic {AGENTS[agent]} fork unavailable: {UNAVAILABLE[agent]}. Source was not resumed or changed")
         if pane.get("agent_status") not in ("idle", "done"):
             raise ForkError("Source must be idle before forking; no input was sent")
         cwd = pane.get("foreground_cwd") or pane.get("cwd")
@@ -168,7 +165,7 @@ class ForkWorkflow:
         if agent == "codex" and self.mode == "fork" and pane.get("agent_session") is None:
             return self._codex_picker(pane, process, cwd)
         owner = None
-        if agent in PI_FAMILY:
+        if agent == "omp":
             owner = read_record(state_root(self.env), self.env.get("HERDR_SOCKET_PATH", ""), pane, process["pid"])
             reference = owner.get("session_file") or native_id(owner["session_id"])
             if self.mode == "read-only" and owner.get("bridge_version") != 1:
@@ -190,8 +187,6 @@ class ForkWorkflow:
                              mcp_servers=mcp, runtime=owner)
         expected_child_id = str(uuid.uuid4()) if agent == "claude" else None
         launch_argv = (*launch.argv, "--session-id", expected_child_id) if expected_child_id else launch.argv
-        if agent in ("pi", "omo"):
-            launch_argv = (*launch_argv, "--extension", str(ROOT / "scripts/runtime_bridge.ts"))
         if owner:
             # The new interactive shell has its own startup environment. Remove
             # absent owner roots explicitly before exec, not with empty variables.
@@ -209,9 +204,6 @@ class ForkWorkflow:
                 raise ForkError("Source session switched before fork")
         elif self._native_reference(latest, agent) != reference:
             raise ForkError("Source session switched before fork")
-        if agent == "copilot":
-            expected_child_id = copilot_fork(shutil.which("copilot") or "copilot", source_session_id, cwd=cwd, environment=environment)
-            launch_argv = (launch_argv[0], "--resume", expected_child_id, *launch_argv[3:])
         # A wrapper that registered `<launcher> --resume <id>` for restart recovery
         # (for example a proxy launcher) also starts the fork.
         launcher = None
@@ -221,7 +213,7 @@ class ForkWorkflow:
         target = self._create_target(pane, cwd, launch.environment)
         self.target = target
         self._wait_shell(target["pane_id"])
-        if agent in PI_FAMILY:
+        if agent == "omp":
             self._start_shell(target["pane_id"], launch_argv)
         elif launcher:
             arguments = list(launch_argv[1:])
@@ -362,11 +354,11 @@ class ForkWorkflow:
             pane = object_value(self.client.json(["pane", "get", pane_id]).get("pane"), "child pane")
             if pane.get("agent_status") == "blocked":
                 raise ForkError("Child requires login, trust, or permission input; no approval was answered")
-            if pane.get("agent") == agent or (agent == "omo" and pane.get("agent") == "pi"):
+            if pane.get("agent") == agent:
                 process = foreground(self.client, pane_id, agent)
                 if self.mode == "read-only" and not ("--tools" in process["argv"] or "--sandbox" in process["argv"]):
                     raise ForkError("Child process argv does not contain read-only restrictions")
-                if agent in PI_FAMILY:
+                if agent == "omp":
                     try:
                         record = read_record(state_root(self.env), self.env.get("HERDR_SOCKET_PATH", ""), {**pane, "agent": agent}, process["pid"])
                         child_id = native_id(record["session_id"])
@@ -440,8 +432,8 @@ def register(client: HerdrClient, env: Mapping[str, str], payload: Mapping[str, 
     if not pane_id or pane.get("pane_id") != pane_id or not isinstance(pane.get("terminal_id"), str) or not pane["terminal_id"]:
         raise ForkError("Registration pane/terminal identity is unavailable or changed")
     kind = payload.get("agent")
-    if kind not in PI_FAMILY:
-        raise ForkError("Registration requires a verified Pi-family agent")
+    if kind != "omp":
+        raise ForkError("Registration requires a verified OMP agent")
     requested_pid = payload.get("pid")
     if type(requested_pid) is not int or not 1 < requested_pid <= 2147483647:
         raise ForkError("Registration requires a valid owner PID")
@@ -463,7 +455,7 @@ def register(client: HerdrClient, env: Mapping[str, str], payload: Mapping[str, 
         process = None
     diagnostics = candidate_diagnostics([process] if process else [])
     pane_agent = pane.get("agent")
-    matches_pane = pane_agent == kind or (kind == "omo" and pane_agent == "pi")
+    matches_pane = pane_agent == kind
     if not matches_pane and pane_agent not in (None, ""):
         raise ForkError("Registration agent does not match the pane owner")
     if process is not None:

@@ -2,7 +2,7 @@ id = "seungwonme.panel-fork"
 name = "Panel Fork"
 version = "0.6.0"
 min_herdr_version = "0.9.5"
-description = "Native panel forks with Pi/OMO, conditional OpenCode/Copilot and safe unsupported-harness diagnostics"
+description = "Native panel forks for OMP, Claude Code and Codex, including registered wrapper launchers"
 platforms = ["macos", "linux"]
 
 [[actions]]

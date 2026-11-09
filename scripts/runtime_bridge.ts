@@ -23,7 +23,6 @@ type API = {
 	getThinkingLevel(): string | undefined;
 	setActiveTools(names: string[]): Promise<void>;
 };
-type PiAgent = "omp" | "pi" | "omo";
 type Registration = {
 	status: "registered" | "not_ready" | "ignored";
 	reason?: string;
@@ -36,16 +35,7 @@ type BridgeOptions = {
 
 const STARTUP_GRACE_MS = 10_000;
 
-const environmentKeys: Record<PiAgent, readonly string[]> = {
-	omp: ["PI_CONFIG_DIR", "PI_CODING_AGENT_DIR"],
-	pi: ["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"],
-	omo: [
-		"OMO_CODING_AGENT_DIR",
-		"SENPI_CODING_AGENT_DIR",
-		"PI_CODING_AGENT_DIR",
-		"OMO_CODING_AGENT_SESSION_DIR",
-	],
-};
+const environmentKeys = ["PI_CONFIG_DIR", "PI_CODING_AGENT_DIR"] as const;
 const xdgKeys = [
 	"XDG_CONFIG_HOME",
 	"XDG_DATA_HOME",
@@ -57,54 +47,12 @@ export function runtimeAgent(
 	environment: Record<string, string | undefined>,
 	executable: string,
 	argv: readonly string[],
-): PiAgent | undefined {
-	let product: PiAgent | undefined;
-	// Product executables take precedence over script paths and user arguments.
-	for (const path of [executable, argv[0]]) {
-		if (!path) continue;
-		const name = basename(path).replace(/\.exe$/, "");
-		if (Object.hasOwn(environmentKeys, name)) {
-			product = name as PiAgent;
-			break;
-		}
-	}
-	// Only inspect the runtime entrypoint, never prompts or extension arguments.
-	if (!product) {
-		for (const path of argv.slice(0, 2)) {
-			if (
-				/\/node_modules\/(?:omo-ai\/bin\/omo\.js|@code-yeongyu\/senpi\/dist\/(?:bundle\/)?cli\.js)$/.test(
-					path,
-				)
-			) {
-				product = "omo";
-				break;
-			}
-			if (
-				/\/node_modules\/@earendil-works\/pi-coding-agent\/dist\/(?:bundle\/)?cli\.js$/.test(
-					path,
-				)
-			) {
-				product = "pi";
-				break;
-			}
-		}
-	}
+): "omp" | undefined {
+	// Only the runtime entrypoint is evidence, never prompts or extension arguments.
 	const explicit = environment.HERDR_PANEL_FORK_AGENT;
-	if (explicit !== undefined) {
-		if (
-			!Object.hasOwn(environmentKeys, explicit) ||
-			(product && product !== explicit)
-		)
-			return undefined;
-		return explicit as PiAgent;
-	}
-	if (product) return product;
-	if (environment.OMO_NATIVE === "1") return "omo";
-	try {
-		if (JSON.parse(environment.SENPI_BRAND ?? "null")?.command === "omo")
-			return "omo";
-	} catch {
-		// An invalid brand marker is not evidence of product identity.
+	if (explicit !== undefined) return explicit === "omp" ? "omp" : undefined;
+	for (const path of [executable, argv[0]]) {
+		if (path && basename(path).replace(/\.exe$/, "") === "omp") return "omp";
 	}
 }
 
@@ -125,11 +73,10 @@ export function readOnlyGuard(event: Event) {
 
 export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 	if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_PANE_ID) return;
-	const agent = runtimeAgent(process.env, process.execPath, process.argv);
-	if (!agent) {
+	if (!runtimeAgent(process.env, process.execPath, process.argv)) {
 		api.on("session_start", (_event, ctx) => {
 			ctx.ui.notify(
-				"Panel Fork registration unavailable: the Pi-family product could not be identified. Set HERDR_PANEL_FORK_AGENT to the verified product.",
+				"Panel Fork registration unavailable: the OMP runtime could not be identified. Set HERDR_PANEL_FORK_AGENT to the verified product.",
 				"warning",
 			);
 		});
@@ -148,10 +95,6 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 	const now = options.now ?? Date.now;
 	async function guard() {
 		if (!readOnly) return;
-		if (agent !== "omp")
-			throw new Error(
-				`Read-only mode is not supported for ${agent}: native guard support has not been verified`,
-			);
 		await api.setActiveTools(["read", "grep", "glob"]);
 		ready = true;
 	}
@@ -162,11 +105,11 @@ export default function runtimeBridge(api: API, options: BridgeOptions = {}) {
 		try {
 			const ctx = current;
 			const environment: Record<string, string> = {};
-			for (const key of [...environmentKeys[agent], ...xdgKeys]) {
+			for (const key of [...environmentKeys, ...xdgKeys]) {
 				if (process.env[key]) environment[key] = process.env[key] as string;
 			}
 			const payload = {
-				agent,
+				agent: "omp",
 				pid: process.pid,
 				cwd: ctx.cwd,
 				session_id: ctx.sessionManager.getSessionId(),

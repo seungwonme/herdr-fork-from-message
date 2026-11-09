@@ -4,12 +4,12 @@ Personal fork of [dmangla3/herdr-fork-from-message](https://github.com/dmangla3/
 One Herdr action opens an independent copy using the agent's native fork operation.
 When a plain Codex pane has no reported session ID, it opens the
 native conversation picker in the new panel instead. Choose the source there to fork.
-Claude Code, Codex, OMP, Pi and OMO have native launch paths. OpenCode and
-Copilot adapters require the prerequisites below. Cursor, Antigravity and Hermes
-are recognized but safely rejected, not silently resumed.
+Only Claude Code, Codex and OMP are supported. Wrapper launchers for Claude Code
+and Codex (for example a proxy launcher) are supported through the contract below.
+Any other harness in the pane is rejected before a destination is created.
 
 The parent receives no keystrokes or automatic child replies. Native bookkeeping
-can still append fork metadata, notably Copilot's source `session.info` fork event.
+can still append fork metadata.
 Normal forks use native permissions and tools. Read-only mode is a separate option.
 Both panels share files; a conversation fork is **not a Git worktree**.
 
@@ -20,19 +20,10 @@ Both panels share files; a conversation fork is **not a Git worktree**.
 | Claude Code 2.1.310 | Native | Trusted Herdr ID; explicit new UUID |
 | Codex 0.164.0 | Native | Trusted Herdr ID; child identity can remain pending until a new prompt |
 | OMP 18.16.0 | Native launch contract | Fresh owner bridge; installed CLI flags checked, current provider E2E unverified |
-| Pi 1.3.0 | Verified native fixture | Owner bridge; distinct IDs, all fixture entries inherited, parent ID unchanged |
-| OMO 5.1.46 | Verified native fixture | Owner bridge; original OMO launcher/config roots/extensions retained, not replaced by Pi |
-| OpenCode 2.1.4 | Conditional adapter | `mini --session ID --fork`; installed Herdr integration must report `ses_...` ID. Local integration absent; full panel E2E unverified |
-| Copilot CLI 1.0.80 | Conditional adapter | Experimental headless `sessions.fork`; durable source in matching storage root and trusted Herdr integration. Native event survived restart; full TUI/provider E2E unverified |
-| Cursor Agent 2026.10.22 | Blocked before destination | `/fork` exists, but source resume can write original metadata; no safe public offline fork API verified |
-| Antigravity 1.4.7 | Blocked before destination | Interactive `/fork` exists; no documented offline fork API without concurrent source resume |
-| Hermes, local installation | Blocked before destination | Dependency environment unavailable; native branch drops tool history, portability import can repair storage or omit metadata |
+| Claude Code / Codex through a wrapper launcher | Native via the registered launcher | Exact saved `custom:<agent>` binding; see the wrapper launcher contract |
 
-Recognition is not a support claim. Blocked harnesses create no destination and
-receive no input. Cursor/Antigravity still offer manual `/fork`, which switches the
-invoking terminal; this is not the plugin's independent-panel workflow. No Hermes
-dependency repair, storage clone or service restart is attempted. Same-ID resume is
-never a substitute for a fork. See the limitations under Verification.
+Every other harness is unsupported. It creates no destination and receives no input.
+Same-ID resume is never a substitute for a fork. See the limitations under Verification.
 
 ## Actions
 
@@ -101,16 +92,14 @@ git clone https://github.com/seungwonme/herdr-fork-from-message.git ~/.agents/pl
 herdr --session default plugin link ~/.agents/plugins/herdr-fork-from-message
 ```
 
-Claude, Codex, OpenCode and Copilot need their matching Herdr integration enabled
+Claude and Codex need their matching Herdr integration enabled
 in the **parent**. Do not disable parent hooks before identity is reported.
 Every Claude fork receives an explicit new `--session-id`; only its optional
-read-only child disables hooks. OpenCode/Copilot use configuration roots from the
-invoking environment, not an owner snapshot: custom XDG/config roots must match the
-source. This equivalence has not been established for arbitrary existing sources.
+read-only child disables hooks.
 
-### OMP, Pi and OMO owner bridge
+### OMP owner bridge
 
-All three Pi-family sources require the plugin bridge, even when Pi reports a Herdr
+OMP sources require the plugin bridge, even when OMP reports a Herdr
 path. The private owner descriptor additionally proves live model/thinking/settings
 and configuration roots. It binds the exact session, transcript path, cwd,
 PID/process start, server socket and terminal. Owner-only records expire after
@@ -125,15 +114,14 @@ A helper launched directly by a nested runtime proves its foreground ancestor
 and skips registration without changing the parent's record. Inherited owner
 markers alone never grant or deny ownership.
 
-For a single new Pi/OMO process, add `--extension <absolute-bridge-path>` to its
+For a single new OMP process, add `--extension <absolute-bridge-path>` to its
 normal launch command. No global configuration change is required for that process:
 
 ```text
 ~/.agents/plugins/herdr-fork-from-message/scripts/runtime_bridge.ts
 ```
 
-The plugin explicitly adds this bridge to Pi/OMO children and preserves OMO's native
-launcher and plugin. Before global registration, review the bridge and obtain approval;
+Before global registration, review the bridge and obtain approval;
 append its path to existing extension arrays with the CLI's official configuration
 interface, never replace other entries. Start a **new** source process afterward.
 Existing processes are not remotely restarted or modified.
@@ -151,11 +139,6 @@ launch and its identity is checked after child startup. Native paths are:
 claude --resume ID --fork-session --session-id NEW_ID
 codex fork ID
 omp --fork PATH
-pi --fork PATH
-omo --fork PATH
-opencode mini --session ID --fork
-# Copilot: private sessions.fork({sessionId: ID}), then:
-copilot --resume NEW_ID
 ```
 
 Wrapper launchers: when the source pane's `custom:claude` or `custom:codex`
@@ -220,18 +203,10 @@ registered wrapper is assumed to select its own profile; a wrapper that wants th
 pane's profile relayed must read it from its own configuration.
 
 Allowlisted launch settings and live bridge values are relayed, not secret
-arguments, inherited prompts or permission-bypass flags. OpenCode `--standalone`
-is retained. Pi-family shell launches use owner-only temporary POSIX scripts with
-shell-neutral paths. Unknown/ambiguous foreground identities fail closed, including
-an OMO process advertised to Herdr as Pi. Exact Node process titles are supported
+arguments, inherited prompts or permission-bypass flags. OMP shell launches use
+owner-only temporary POSIX scripts with shell-neutral paths. Unknown/ambiguous
+foreground identities fail closed. Exact Node process titles are supported
 when Node hides argv; owner registration supplies live settings in that case.
-
-Copilot uses a private headless process with a 30-second operation deadline, bounded
-stdio frames, no client tool/auth/permission callbacks and private-process-group
-cleanup. It does not resume the parent. The native API adds a source fork-info event;
-this is bookkeeping, not a child answer or automatic model turn. An RPC acknowledgement
-alone does not prove complete durable history. TUI startup must report the expected
-new ID. The native CLI can still perform its own normal authentication/network startup.
 
 A failed/login/trust/approval destination is **preserved**, never closed or answered
 automatically. Parent resources are never closed. Failures are not replaced by fresh
@@ -256,8 +231,6 @@ Only `--mode read-only` or the read-only action applies these controls:
 - OMP: `read/grep/glob`, explicit guard extension only, goal-disabled child overlay;
   every other tool call is denied, including dynamically introduced names.
 
-New Pi/OMO/OpenCode/Copilot read-only modes are **unverified and rejected before
-creating a destination**. Native fork support does not imply read-only support.
 The child policy treats inherited work as background and forbids contacting the parent.
 These are model-tool restrictions, not an OS filesystem sandbox. Shared files,
 trusted runtime extensions, user terminal commands and changed permissions remain
@@ -271,8 +244,8 @@ outside that boundary.
 
 Tests cover manifest-to-CLI defaults, argv/policy, owner settings, stale records,
 source races, missing/wrong IDs, placements, failure preservation, interpreter and
-Node-title identities, OMO launcher selection, blocked harnesses, navigation/goal
-controls, and bounded RPC framing/callbacks/timeouts/private-process cleanup.
+Node-title identities, unsupported-harness rejection, wrapper launchers, and
+navigation/goal controls.
 
 Earlier restricted-mode QA on macOS/Herdr 0.9.5 established OMP distinct
 IDs/guard readiness/history, but its configured model returned 403. OMP 18.16.0
@@ -280,19 +253,8 @@ CLI flags have been checked locally; current provider behavior is not verified b
 these tests. Claude's explicit UUID was observed in earlier QA. Earlier Claude
 recall and Codex startup/MCP outcomes are not re-established by this change.
 
-Additional model-free QA reused one disposable tab with one source and at most one
-child at a time. Pi and OMO produced distinct child IDs with equal inherited native
-fixture entries and unchanged parent IDs. Copilot's native logged event survived a
-fork and a new headless process; its parent gained the native fork notification.
-An initial log-only Copilot session without a native fork was not discoverable after
-restart, so source persistence is a real prerequisite. OpenCode's isolated native API
-rejected an empty-session fork; its missing Herdr integration prevented panel E2E.
-It was not installed as part of QA.
-
-No provider prompts were submitted. Model recall, complete tool-event fidelity and
-Copilot/OpenCode TUI E2E are not claimed. These fixtures contain no private parent
-content. Compatibility diagnostics and static API evidence do not mean all 10
-harnesses are fully supported.
+No provider prompts were submitted. Model recall and complete tool-event fidelity
+are not claimed.
 
 ## Remove
 
@@ -311,9 +273,5 @@ credentials, global rules, skills, existing hooks or keybindings are deleted.
 - [Base implementation](https://github.com/dmangla3/herdr-fork-from-message).
 - [forkr](https://github.com/t4t5/herdr-forkr): direct current-point Herdr actions.
 - [OMP native fork](https://github.com/can1357/oh-my-pi/blob/v18.12.6/docs/session-operations-export-share-fork-resume.md#fork).
-- [Copilot fork schema](https://github.com/github/copilot-sdk/blob/v0.2.2/nodejs/src/generated/rpc.ts#L394-L410): omit `toEventId` for all events.
-- [OpenCode session selection](https://github.com/anomalyco/opencode/blob/v2.1.4/packages/cli/src/session-target.ts).
-- [Cursor slash commands](https://cursor.com/docs/cli/reference/slash-commands).
-- [Antigravity conversations](https://antigravity.google/docs/cli/conversations).
 
 [MIT license](LICENSE). Upstream attribution retained.

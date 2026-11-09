@@ -245,7 +245,7 @@ class WorkflowTests(unittest.TestCase):
             "native agent": self.saved_store(["claude", "--resume", SOURCE], pane_number=1),
             "stale session": self.saved_store(["claude-proxy", "--resume", CHILD], pane_number=1),
             "other pane": self.saved_store(["claude-proxy", "--resume", SOURCE], pane_number=2),
-            "foreign reporter": self.saved_store(["claude-proxy", "--resume", SOURCE], source="custom:pi", pane_number=1),
+            "foreign reporter": self.saved_store(["claude-proxy", "--resume", SOURCE], source="custom:other", pane_number=1),
             "extra arguments": self.saved_store(["claude-proxy", "--resume", SOURCE, "--model", "x"], pane_number=1),
             "path launcher": self.saved_store(["/tmp/evil", "--resume", SOURCE], pane_number=1),
             "shell syntax": self.saved_store(["a;b", "--resume", SOURCE], pane_number=1),
@@ -284,11 +284,12 @@ class WorkflowTests(unittest.TestCase):
                 self.assertFalse(any(c[:2] == ("agent", "focus") for c in client.calls))
 
     def test_unsupported_agent_fails_before_split(self):
-        with tempfile.TemporaryDirectory() as cwd:
-            client = FakeClient(cwd, "unknown")
-            with self.assertRaisesRegex(module.ForkError, "Supported agents"):
-                self.workflow(client).execute()
-        self.assertFalse(any(c[:2] == ("pane", "split") for c in client.calls))
+        for agent in ("unknown", "pi", "opencode", "copilot"):
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory() as cwd:
+                client = FakeClient(cwd, agent)
+                with self.assertRaisesRegex(module.ForkError, "Supported agents: claude, codex, omp"):
+                    self.workflow(client).execute()
+                self.assertFalse(any(c[:2] in (("pane", "split"), ("agent", "start"), ("pane", "run")) for c in client.calls))
 
     def test_missing_session_never_falls_back_to_new_conversation(self):
         with tempfile.TemporaryDirectory() as cwd:

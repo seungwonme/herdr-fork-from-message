@@ -104,13 +104,11 @@ describe("registration readiness", () => {
 		return { handlers, warnings, ctx };
 	}
 
-	test("Pi-family runtimes register the current context cwd", async () => {
-		for (const agent of ["omp", "pi", "omo"]) {
-			const f = registrationFixture(agent);
-			f.ctx.cwd = `/fixture/${agent}`;
-			await f.handlers.get("session_start")?.({}, f.ctx);
-			expect(f.payload().cwd).toBe(`/fixture/${agent}`);
-		}
+	test("OMP registers the current context cwd", async () => {
+		const f = registrationFixture("omp");
+		f.ctx.cwd = "/fixture/omp";
+		await f.handlers.get("session_start")?.({}, f.ctx);
+		expect(f.payload().cwd).toBe("/fixture/omp");
 	});
 
 	test("normal OMP navigation refreshes the owner from the new context", async () => {
@@ -203,114 +201,34 @@ describe("registration readiness", () => {
 	});
 });
 
-describe("Pi-family product identity", () => {
-	test("a bare Bun runtime can use an explicit product identity", () => {
-		for (const agent of ["omp", "pi", "omo"] as const)
-			expect(
-				runtimeAgent(
-					{ HERDR_PANEL_FORK_AGENT: agent, OMO_NATIVE: "1" },
-					"/usr/bin/bun",
-					["bun"],
-				),
-			).toBe(agent);
+describe("OMP product identity", () => {
+	test("a bare Bun runtime can use an explicit OMP identity", () => {
+		expect(
+			runtimeAgent({ HERDR_PANEL_FORK_AGENT: "omp" }, "/usr/bin/bun", ["bun"]),
+		).toBe("omp");
 	});
-	test("a nested Pi executable or entrypoint outranks inherited OMO markers", () => {
-		for (const environment of [
-			{ OMO_NATIVE: "1" },
-			{ SENPI_BRAND: '{"command":"omo"}' },
-			{ HERDR_PANEL_FORK_AGENT: "pi", OMO_NATIVE: "1" },
-		]) {
-			expect(runtimeAgent(environment, "/opt/bin/pi", ["pi"])).toBe("pi");
+	test("an OMP executable identifies the product", () => {
+		expect(runtimeAgent({}, "/opt/bin/omp", ["omp"])).toBe("omp");
+		expect(runtimeAgent({}, "/usr/bin/bun", ["omp"])).toBe("omp");
+		expect(runtimeAgent({}, "/opt/bin/omp.exe", ["omp.exe"])).toBe("omp");
+	});
+	test("an explicit unknown product fails closed", () => {
+		for (const explicit of ["unknown", "pi", ""])
 			expect(
-				runtimeAgent(environment, "/usr/bin/bun", [
-					"bun",
-					"/opt/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+				runtimeAgent({ HERDR_PANEL_FORK_AGENT: explicit }, "/opt/bin/omp", [
+					"omp",
 				]),
-			).toBe("pi");
-		}
-	});
-	test("an explicit unknown or conflicting product fails closed", () => {
-		for (const [executable, argv, explicit] of [
-			["/opt/bin/pi", ["pi"], "omo"],
-			["/opt/bin/omo", ["omo"], "pi"],
-			["/opt/bin/omp", ["omp"], "pi"],
-			["/opt/bin/omp", ["omp"], "unknown"],
-			[
-				"/usr/bin/bun",
-				[
-					"bun",
-					"/opt/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
-				],
-				"omo",
-			],
-			["/usr/bin/bun", ["bun", "/opt/node_modules/omo-ai/bin/omo.js"], "pi"],
-		] as const) {
-			expect(
-				runtimeAgent(
-					{ HERDR_PANEL_FORK_AGENT: explicit, OMO_NATIVE: "1" },
-					executable,
-					argv,
-				),
 			).toBeUndefined();
-		}
 	});
-	test("OMO native and SENPI brand markers override the Pi transport identity", () => {
-		for (const environment of [
-			{ OMO_NATIVE: "1", HERDR_AGENT: "pi" },
-			{ SENPI_BRAND: '{"command":"omo"}', HERDR_AGENT: "pi" },
-		]) {
-			expect(runtimeAgent(environment, "/usr/bin/bun", ["bun"])).toBe("omo");
-		}
-	});
-	test("known native executable and engine paths identify the product", () => {
-		for (const agent of ["omp", "pi", "omo"] as const) {
-			expect(runtimeAgent({}, `/opt/bin/${agent}`, [agent])).toBe(agent);
-		}
-		for (const [path, agent] of [
-			[
-				"/opt/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
-				"pi",
-			],
-			["/opt/node_modules/@earendil-works/pi-coding-agent/dist/cli.js", "pi"],
-			["/opt/node_modules/omo-ai/bin/omo.js", "omo"],
-			[
-				"/opt/node_modules/omo-ai/node_modules/@code-yeongyu/senpi/dist/bundle/cli.js",
-				"omo",
-			],
-			[
-				"/opt/node_modules/omo-ai/node_modules/@code-yeongyu/senpi/dist/cli.js",
-				"omo",
-			],
-			["/opt/node_modules/@code-yeongyu/senpi/dist/bundle/cli.js", "omo"],
-			["/opt/node_modules/@code-yeongyu/senpi/dist/cli.js", "omo"],
-		]) {
-			expect(runtimeAgent({}, "/usr/bin/bun", ["bun", path])).toBe(agent);
-		}
-	});
-	test("unknown or invalid identities never silently register as OMP", () => {
-		for (const environment of [
-			{},
-			{ HERDR_AGENT: "pi" },
-			{ HERDR_PANEL_FORK_AGENT: "other" },
-			{ SENPI_BRAND: "not json" },
-			{ SENPI_BRAND: '{"command":"other"}' },
-		]) {
+	test("unknown identities never silently register as OMP", () => {
+		for (const environment of [{}, { HERDR_AGENT: "pi" }])
 			expect(
 				runtimeAgent(environment, "/usr/bin/bun", ["bun", "/fixture/cli.js"]),
 			).toBeUndefined();
-		}
 		expect(
-			runtimeAgent({}, "/usr/bin/bun", ["bun", "/fixture/cli.js", "omo"]),
+			runtimeAgent({}, "/usr/bin/bun", ["bun", "/fixture/cli.js", "omp"]),
 		).toBeUndefined();
-		expect(runtimeAgent({}, "/usr/bin/bun", ["bun", "omo"])).toBeUndefined();
-		expect(runtimeAgent({}, "/opt/bin/omp", ["omp", "omo"])).toBe("omp");
-		expect(
-			runtimeAgent(
-				{ HERDR_PANEL_FORK_AGENT: "other", OMO_NATIVE: "1" },
-				"/opt/bin/omp",
-				["omp"],
-			),
-		).toBeUndefined();
+		expect(runtimeAgent({}, "/usr/bin/bun", ["bun", "omp"])).toBeUndefined();
 	});
 	test("an unidentified runtime warns without registering or changing tools", async () => {
 		Object.assign(process.env, {
@@ -342,14 +260,14 @@ describe("Pi-family product identity", () => {
 				},
 			},
 		);
-		expect(warnings[0]).toContain("product could not be identified");
+		expect(warnings[0]).toContain("OMP runtime could not be identified");
 		expect(changedTools).toBe(false);
 	});
 });
 
-describe("Pi-family owner registration", () => {
+describe("OMP owner registration", () => {
 	test("an unauthenticated placeholder model is not relayed as a real selector", async () => {
-		const fixture = registrationFixture("pi");
+		const fixture = registrationFixture("omp");
 		await fixture.handlers.get("session_start")?.(
 			{},
 			{
@@ -360,7 +278,7 @@ describe("Pi-family owner registration", () => {
 		expect(fixture.payload().model).toBeUndefined();
 	});
 	test("the helper uses the parent's pinned root over an inherited plugin root", async () => {
-		const fixture = registrationFixture("pi");
+		const fixture = registrationFixture("omp");
 		process.env.HERDR_PANEL_FORK_STATE_DIR = "/parent/pinned-state";
 		process.env.HERDR_PLUGIN_STATE_DIR = "/shell/conflicting-state";
 		await fixture.handlers.get("session_start")?.({}, fixture.ctx);
@@ -371,7 +289,7 @@ describe("Pi-family owner registration", () => {
 		expect(process.env.HERDR_PLUGIN_STATE_DIR).toBe("/shell/conflicting-state");
 	});
 	test("the helper keeps the existing plugin root when no parent root is pinned", async () => {
-		const fixture = registrationFixture("omo");
+		const fixture = registrationFixture("omp");
 		delete process.env.HERDR_PANEL_FORK_STATE_DIR;
 		process.env.HERDR_PLUGIN_STATE_DIR = "/shell/existing-state";
 		await fixture.handlers.get("session_start")?.({}, fixture.ctx);
@@ -382,16 +300,6 @@ describe("Pi-family owner registration", () => {
 	});
 	for (const [agent, keys] of [
 		["omp", ["PI_CONFIG_DIR", "PI_CODING_AGENT_DIR"]],
-		["pi", ["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"]],
-		[
-			"omo",
-			[
-				"OMO_CODING_AGENT_DIR",
-				"SENPI_CODING_AGENT_DIR",
-				"PI_CODING_AGENT_DIR",
-				"OMO_CODING_AGENT_SESSION_DIR",
-			],
-		],
 	] as const) {
 		test(`${agent} registers live settings and configuration without restricting normal mode`, async () => {
 			const fixture = registrationFixture(agent);
@@ -479,31 +387,6 @@ describe("Pi-family owner registration", () => {
 			)) as { systemPrompt: string };
 			expect(result.systemPrompt).toStartWith("Original prompt\n\n");
 			expect(result.systemPrompt).toContain("Only read tools are permitted");
-		});
-	}
-	for (const agent of ["pi", "omo"]) {
-		test(`${agent} rejects unverified read-only registration`, async () => {
-			Object.assign(process.env, {
-				HERDR_ENV: "1",
-				HERDR_PANE_ID: "fixture",
-				HERDR_PANEL_FORK_AGENT: agent,
-				HERDR_PANEL_FORK_READ_ONLY: "1",
-			});
-			const handlers = new Map<string, Handler>();
-			let changedTools = false;
-			bridge({
-				on: (name, handler) => {
-					handlers.set(name, handler);
-				},
-				getThinkingLevel: () => "high",
-				setActiveTools: async () => {
-					changedTools = true;
-				},
-			});
-			await expect(
-				handlers.get("session_start")?.({}, context()),
-			).rejects.toThrow("native guard support has not been verified");
-			expect(changedTools).toBe(false);
 		});
 	}
 });

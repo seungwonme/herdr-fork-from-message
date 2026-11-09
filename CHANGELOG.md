@@ -5,6 +5,7 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- **Breaking:** limit Panel Fork to OMP, Claude Code and Codex, plus registered wrapper launchers (`claude-proxy`, `codex-proxy`) for the latter two. Pi, OMO, OpenCode, Copilot, Cursor, Antigravity and Hermes support is removed, including the Copilot RPC client, Pi/OMO bridge branches and their tests; those panes are rejected before a destination is created.
 - Remove the retired harness launch and bridge support; keep OMP native fork, owner registration, and optional read-only controls.
 
 - Open the native fork picker for plain Codex panes with no reported session ID; distinguish `awaiting_selection` from completed forks without changing CLI commands or global hooks.
