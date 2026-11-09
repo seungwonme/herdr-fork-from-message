@@ -31,6 +31,17 @@ before cleaning it up; do not accumulate failed panes. Close the owned source an
 tab at the end, and verify unrelated panes and focus are unchanged. Never close
 a pre-existing user pane or leave a test agent running after evidence collection.
 
+`scripts/e2e.py` automates these rules against an isolated Herdr server
+(`herdr --session pfe2e-*`, its own socket and `HERDR_PANEL_FORK_STATE_DIR`). It
+makes real model calls, so `check.sh` and CI never run it:
+
+```sh
+python3 scripts/e2e.py --agents claude,codex,omp
+```
+
+Run the wrapper cases (`claude-proxy`, `codex-proxy`) from a human terminal; from
+an agent session they report `skipped`. See README "Live E2E".
+
 Use a conventional commit subject such as `fix: handle changed picker marker`.
 
 ## Pull requests
