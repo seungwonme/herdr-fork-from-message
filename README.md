@@ -263,6 +263,34 @@ These are model-tool restrictions, not an OS filesystem sandbox. Shared files,
 trusted runtime extensions, user terminal commands and changed permissions remain
 outside that boundary.
 
+### Live E2E
+
+`scripts/e2e.py` forks real agents on a throw-away Herdr server and checks that the
+child inherited the conversation. It is stdlib-only, makes model calls, and is not
+part of `check.sh` or CI.
+
+```sh
+python3 scripts/e2e.py --agents claude,codex,omp   # the default set also adds claude-proxy,codex-proxy
+python3 scripts/e2e.py --agents claude --args 'claude=--model sonnet' --keep
+```
+
+Per agent it starts a source in one disposable tab, gives it a random codeword, runs
+`fork_from_message.py --pane ... --no-focus` against the test socket, then asserts:
+status `ready` or `started_identity_pending`; the child pane exists; the source
+session ID and transcript line count are unchanged; the child's session ID differs and
+its last assistant message contains the codeword. A plain shell pane must fail without
+creating a pane. The server, panes and temp dirs are removed afterwards (`--keep`
+leaves them); the `default` session and the real owner state are not touched.
+
+Defaults use cheap models: Claude `--model haiku`, OMP `--model
+company-proxy/gpt-6.1-terra:low`, Codex your configured default. Override with
+`--args AGENT=ARGS`. Codex starts with `--no-daemon`: with the shared app-server
+daemon, its SessionStart hook runs in the daemon's environment, so a test pane never
+reports a session ID. `claude-proxy` and `codex-proxy` need a human terminal because
+the launchers refuse agent sessions; the tester reports `skipped` and never clears
+agent markers. It never answers trust or approval dialogs: a blocked pane fails the
+case with a screen excerpt. Pi, OMO, OpenCode and Copilot are not covered.
+
 ## Verification
 
 ```sh

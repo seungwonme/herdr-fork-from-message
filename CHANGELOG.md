@@ -5,6 +5,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Add `scripts/e2e.py`, a live E2E tester that forks Claude, Codex, OMP and the `claude-proxy`/`codex-proxy` wrappers on an isolated Herdr server and checks codeword recall, child/source identity and an unchanged source transcript. Not run by `check.sh` or CI.
+
 - Remove the retired harness launch and bridge support; keep OMP native fork, owner registration, and optional read-only controls.
 
 - Open the native fork picker for plain Codex panes with no reported session ID; distinguish `awaiting_selection` from completed forks without changing CLI commands or global hooks.
